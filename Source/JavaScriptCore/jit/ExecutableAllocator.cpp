@@ -42,6 +42,7 @@
 #include <wtf/ProcessID.h>
 #include <wtf/RedBlackTree.h>
 #include <wtf/Scope.h>
+#include <wtf/Seconds.h>
 #include <wtf/SequesteredMalloc.h>
 #include <wtf/SystemTracing.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -628,6 +629,15 @@ static ALWAYS_INLINE JITReservation initializeJITPageReservation()
 
         if (g_jscConfig.useFastJITPermissions)
             threadSelfRestrict<MemoryRestriction::kRwxToRx>();
+
+#if PLATFORM(MAC) && USE(BUN_JSC_ADDITIONS)
+        // macOS 27 can trap when the first transition to writable follows MAP_JIT too quickly.
+        // FIXME(oven-sh/bun#42687): Remove this delay after Apple ships a fix.
+        if (g_jscConfig.useFastJITPermissions) {
+            if (__builtin_available(macOS 27.0, *))
+                WTF::sleep(100_us);
+        }
+#endif
 
 #if ENABLE(SEPARATED_WX_HEAP)
         if (!g_jscConfig.useFastJITPermissions) {
