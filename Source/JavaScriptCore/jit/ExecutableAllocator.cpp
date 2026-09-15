@@ -635,7 +635,7 @@ static ALWAYS_INLINE JITReservation initializeJITPageReservation()
         // FIXME(oven-sh/bun#42687): Remove this delay after Apple ships a fix.
         if (g_jscConfig.useFastJITPermissions) {
             if (__builtin_available(macOS 27.0, *))
-                WTF::sleep(100_us);
+                WTF::sleep(1_ms);
         }
 #endif
 
