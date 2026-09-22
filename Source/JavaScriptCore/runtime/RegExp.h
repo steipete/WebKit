@@ -214,6 +214,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
     const WTF::BitSet<256>* firstCharacterBitmap(FirstCharacterFilterPosition);
 
 private:
+    size_t chargedOldMemorySize() const;
     template<Yarr::MatchFrom thread>
     int matchInlineOnce(JSGlobalObject* nullOrGlobalObject, VM&, StringView, unsigned startOffset, std::span<int> ovector);
     template<Yarr::MatchFrom thread>

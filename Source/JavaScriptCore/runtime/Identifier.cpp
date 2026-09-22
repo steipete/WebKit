@@ -37,7 +37,13 @@ Ref<AtomStringImpl> Identifier::add8(VM& vm, std::span<const char16_t> s)
     }
     if (s.empty())
         return *static_cast<AtomStringImpl*>(StringImpl::empty());
-    return *AtomStringImpl::add(s);
+    if (!vm.heap.hasOldGenerationLimit())
+        return *AtomStringImpl::add(s);
+
+    size_t newlyAllocatedOwnedBackingCost = 0;
+    Ref atom = AtomStringImpl::add(s, &newlyAllocatedOwnedBackingCost).releaseNonNull();
+    vm.heap.noteChargedOldMemoryAllocated(newlyAllocatedOwnedBackingCost);
+    return atom;
 }
 
 Identifier Identifier::from(VM& vm, unsigned value)

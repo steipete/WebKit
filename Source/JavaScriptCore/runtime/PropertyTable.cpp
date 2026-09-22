@@ -128,6 +128,7 @@ PropertyTable::PropertyTable(VM& vm, unsigned initialCapacity, const PropertyTab
 void PropertyTable::finishCreation(VM& vm)
 {
     Base::finishCreation(vm);
+    vm.heap.noteChargedOldMemoryAllocated(chargedOldMemorySize());
     vm.heap.reportExtraMemoryAllocated(this, dataSize(isCompact()));
 }
 
@@ -138,6 +139,15 @@ void PropertyTable::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     ASSERT_GC_OBJECT_INHERITS(thisObject, info());
     Base::visitChildren(cell, visitor);
     visitor.reportExtraMemoryVisited(thisObject->dataSize(thisObject->isCompact()));
+    if (visitor.heap()->hasOldGenerationLimit())
+        visitor.reportChargedOldMutableMemoryVisited(thisObject, [] (const JSCell* cell, Heap& heap) {
+            auto* table = static_cast<const PropertyTable*>(cell);
+            heap.reportChargedOldMemoryVisited(table->chargedOldMemorySize());
+            table->forEachProperty([&] (const auto& entry) {
+                heap.reportChargedOldStringVisited(entry.key());
+                return IterationStatus::Continue;
+            });
+        });
 }
 
 DEFINE_VISIT_CHILDREN(PropertyTable);

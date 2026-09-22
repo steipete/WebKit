@@ -350,12 +350,28 @@ public:
 
     void setJITCode(Ref<JSC::JITCode>&& code)
     {
-        if (!code->isShared())
-            heap()->reportExtraMemoryAllocated(this, code->size());
+        bool chargeToOldGeneration = !code->isShared();
+        size_t codeSize = 0;
+        if (chargeToOldGeneration)
+            codeSize = code->size();
+        bool hasOldGenerationLimit = heap()->hasOldGenerationLimit();
 
-        ConcurrentJSLocker locker(m_lock);
-        WTF::storeStoreFence(); // This is probably not needed because the lock will also do something similar, but it's good to be paranoid.
-        m_jitCode = WTF::move(code);
+        if (chargeToOldGeneration && !hasOldGenerationLimit)
+            heap()->reportExtraMemoryAllocated(this, codeSize);
+
+        {
+            ConcurrentJSLocker locker(m_lock);
+            size_t oldCodeSize = 0;
+            if (hasOldGenerationLimit && m_jitCode && !m_jitCode->isShared())
+                oldCodeSize = m_jitCode->size();
+            WTF::storeStoreFence(); // This is probably not needed because the lock will also do something similar, but it's good to be paranoid.
+            m_jitCode = WTF::move(code);
+            if (hasOldGenerationLimit && chargeToOldGeneration && codeSize > oldCodeSize)
+                heap()->noteChargedOldMemoryAllocated(codeSize - oldCodeSize);
+        }
+
+        if (chargeToOldGeneration && hasOldGenerationLimit)
+            heap()->reportExtraMemoryAllocated(this, codeSize);
     }
 
     RefPtr<JSC::JITCode> jitCode() { return m_jitCode; }

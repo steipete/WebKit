@@ -48,6 +48,8 @@ namespace JSC {
 
 class SourceCode;
 class SourceCodeKey;
+class AbstractSlotVisitor;
+class Heap;
 class UnlinkedCodeBlock;
 class UnlinkedFunctionExecutable;
 class UnlinkedFunctionCodeBlock;
@@ -77,6 +79,10 @@ public:
 
     JS_EXPORT_PRIVATE virtual unsigned hash() const = 0;
     JS_EXPORT_PRIVATE virtual StringView source() const = 0;
+    JS_EXPORT_PRIVATE virtual const StringImpl* sourceStringImplForOldGenerationAccounting() const { return nullptr; }
+    JS_EXPORT_PRIVATE size_t oldGenerationMemorySize() const;
+    JS_EXPORT_PRIVATE void reportChargedOldMemory(AbstractSlotVisitor&) const;
+    JS_EXPORT_PRIVATE void reportChargedOldMutableMemory(Heap&) const;
     JS_EXPORT_PRIVATE virtual RefPtr<CachedBytecode> cachedBytecode() const { return nullptr; }
     JS_EXPORT_PRIVATE virtual void cacheBytecode(const BytecodeCacheGenerator&) const { }
     JS_EXPORT_PRIVATE virtual void updateCache(const UnlinkedFunctionExecutable*, const SourceCode&, CodeSpecializationKind, const UnlinkedFunctionCodeBlock*) const { }
@@ -123,9 +129,18 @@ public:
             getID();
         return m_id;
     }
+    SourceID sourceIDForOldGenerationAccounting() const { ASSERT(m_id); return m_id; }
 
-    void setSourceURLDirective(const String& sourceURLDirective) { m_sourceURLDirective = sourceURLDirective; }
-    void setSourceMappingURLDirective(const String& sourceMappingURLDirective) { m_sourceMappingURLDirective = sourceMappingURLDirective; }
+    void setSourceURLDirective(const String& sourceURLDirective)
+    {
+        setSourceDirective(m_sourceURLDirective, String { sourceURLDirective });
+    }
+    void setSourceMappingURLDirective(const String& sourceMappingURLDirective)
+    {
+        setSourceDirective(m_sourceMappingURLDirective, String { sourceMappingURLDirective });
+    }
+    JS_EXPORT_PRIVATE void setNewlyAllocatedSourceURLDirective(VM&, String&&);
+    JS_EXPORT_PRIVATE void setNewlyAllocatedSourceMappingURLDirective(VM&, String&&);
     void setSourceTaintedOrigin(SourceTaintedOrigin taintedness) { m_taintedness = taintedness; }
 
     SourceTaintedOrigin sourceTaintedOrigin() const { return m_taintedness; }
@@ -144,6 +159,9 @@ private:
     JS_EXPORT_PRIVATE virtual void unlockUnderlyingBufferImpl();
 
     JS_EXPORT_PRIVATE void NODELETE getID();
+    void setNewlyAllocatedDirective(VM&, String& target, String&&);
+    void setSourceDirective(String& target, String&&);
+    void copySourceDirectivesForOldGenerationAccounting(String&, String&) const;
 
     std::atomic<unsigned> m_lockingCount { 0 };
     SourceProviderSourceType m_sourceType;
@@ -151,6 +169,7 @@ private:
     String m_sourceURL;
     String m_sourceURLStripped;
     String m_preRedirectURL;
+    mutable Lock m_sourceDirectiveLock;
     String m_sourceURLDirective;
     String m_sourceMappingURLDirective;
     TextPosition m_startPosition;
@@ -180,6 +199,8 @@ public:
     {
         return m_source.get();
     }
+
+    const StringImpl* sourceStringImplForOldGenerationAccounting() const override { return &m_source.get(); }
 
 protected:
     StringSourceProvider(const String& source, const SourceOrigin& sourceOrigin, SourceTaintedOrigin taintedness, String&& sourceURL, const TextPosition& startPosition, SourceProviderSourceType sourceType)

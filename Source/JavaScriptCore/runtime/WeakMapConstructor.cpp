@@ -102,6 +102,11 @@ JSC_DEFINE_HOST_FUNCTION(constructWeakMap, (JSGlobalObject* globalObject, CallFr
                 return;
             }
             weakMap->set(vm, key.asCell(), value);
+            EnsureStillAliveScope ensureWeakMapIsAlive(weakMap);
+            EnsureStillAliveScope ensureKeyIsAlive(key);
+            EnsureStillAliveScope ensureValueIsAlive(value);
+            vm.heap.serviceOldGenerationLimitIfPending();
+            RETURN_IF_EXCEPTION(scope, void());
             return;
         }
 

@@ -248,7 +248,10 @@ void MarkedSpace::registerPreciseAllocation(PreciseAllocation* allocation, bool 
     if (isNewAllocation) {
         // Existing code's ordering is calling `didAllocate` and increasing capacity.
         size_t size = allocation->cellSize();
-        heap().didAllocate(size);
+        if (allocation->subspace() == &heap().primitiveGigacageAuxiliarySpace)
+            heap().didAllocate(size);
+        else
+            heap().didAllocateCharged(size);
         m_capacity += size;
     }
 }

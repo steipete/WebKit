@@ -268,6 +268,11 @@ private:
     static uintptr_t allocateZeroedIndexVector(bool isCompact, unsigned indexSize);
     static void destroyIndexVector(uintptr_t indexVector);
 
+    size_t chargedOldMemorySize() const
+    {
+        return dataSize(isCompact(), m_indexSize) + (m_deletedOffsets ? m_deletedOffsets->capacity() * sizeof(PropertyOffset) : 0);
+    }
+
     template<typename Func>
     static ALWAYS_INLINE auto withIndexVector(uintptr_t indexVector, Func&& function) -> decltype(auto)
     {
@@ -474,7 +479,11 @@ inline void PropertyTable::addDeletedOffset(PropertyOffset offset)
     if (!m_deletedOffsets)
         m_deletedOffsets = makeUnique<Vector<PropertyOffset>>();
     ASSERT(!m_deletedOffsets->contains(offset));
+    size_t oldCapacity = m_deletedOffsets->capacity();
     m_deletedOffsets->append(offset);
+    size_t newCapacity = m_deletedOffsets->capacity();
+    if (newCapacity > oldCapacity)
+        Heap::heap(this)->noteChargedOldMemoryAllocated((newCapacity - oldCapacity) * sizeof(PropertyOffset));
 }
 
 inline PropertyOffset PropertyTable::nextOffset(PropertyOffset inlineCapacity)
@@ -578,8 +587,10 @@ inline void PropertyTable::rehash(VM& vm, unsigned newCapacity, bool canStayComp
     destroyIndexVector(oldIndexVector);
 
     size_t newDataSize = dataSize(this->isCompact());
-    if (oldDataSize < newDataSize)
+    if (oldDataSize < newDataSize) {
+        vm.heap.noteChargedOldMemoryAllocated(newDataSize - oldDataSize);
         vm.heap.reportExtraMemoryAllocated(this, newDataSize - oldDataSize);
+    }
 }
 
 inline unsigned PropertyTable::tableCapacity() const { return m_indexSize >> 1; }

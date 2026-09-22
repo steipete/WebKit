@@ -720,13 +720,13 @@ bool doesGC(Graph& graph, Node* node)
             return true;
         }
 
-    // WeakSet / WeakMap storages are not GC-managed buffer, thus adding an element does not cause GC,
-    // unless we throw an error due to key type. An error can be thrown even though a key is Symbol
-    // if the Symbol key is not registered one.
+    // WeakSet / WeakMap storages are not GC-managed buffers. Adding an element only causes GC when
+    // a limited heap services charged buffer growth, or when we throw due to the key type. An error
+    // can be thrown even though a key is Symbol if the Symbol key is not a registered one.
     case WeakSetAdd:
-        return node->child2().useKind() != ObjectUse;
+        return graph.m_vm.heap.hasOldGenerationLimit() || node->child2().useKind() != ObjectUse;
     case WeakMapSet:
-        return graph.varArgChild(node, 1).useKind() != ObjectUse;
+        return graph.m_vm.heap.hasOldGenerationLimit() || graph.varArgChild(node, 1).useKind() != ObjectUse;
 
     case LastNodeType:
         RELEASE_ASSERT_NOT_REACHED();

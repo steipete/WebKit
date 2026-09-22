@@ -145,6 +145,23 @@ static constexpr bool verboseStop = false;
 
 namespace {
 
+size_t saturatingAdd(size_t left, size_t right)
+{
+    CheckedSize result = left;
+    result += right;
+    return result.hasOverflowed() ? std::numeric_limits<size_t>::max() : result.value();
+}
+
+size_t saturatingAtomicAdd(std::atomic<size_t>& counter, size_t value)
+{
+    size_t oldValue = counter.load(std::memory_order_relaxed);
+    for (;;) {
+        size_t newValue = saturatingAdd(oldValue, value);
+        if (counter.compare_exchange_weak(oldValue, newValue, std::memory_order_relaxed))
+            return newValue;
+    }
+}
+
 double maxPauseMS(double thisPauseMS)
 {
     static double maxPauseMS;
@@ -337,8 +354,9 @@ private:
 #define INIT_SERVER_STRUCTURE_ISO_SUBSPACE(name, heapCellType, type) \
     , name(#name, *this, heapCellType, WTF::roundUpToMultipleOf<type::atomSize>(sizeof(type)), type::numberOfLowerTierPreciseCells, makeUnique<StructureAlignedMemoryAllocator>())
 
-Heap::Heap(VM& vm, HeapType heapType)
+Heap::Heap(VM& vm, HeapType heapType, HeapConfiguration configuration)
     : m_heapType(heapType)
+    , m_maxOldGenerationSize(configuration.maxOldGenerationSize)
     , m_ramSize(Options::forceRAMSize() ? Options::forceRAMSize() : ramSize())
     , m_minBytesPerCycle(minHeapSize(m_heapType, m_ramSize))
     , m_maxEdenSize(m_minBytesPerCycle)
@@ -442,6 +460,12 @@ Heap::Heap(VM& vm, HeapType heapType)
     , unlinkedFunctionExecutableSpaceAndSet ISO_SUBSPACE_INIT(*this, destructibleCellHeapCellType, UnlinkedFunctionExecutable) // Hash:0x3ba0f4e1
 
 {
+    if (hasOldGenerationLimit()) {
+        m_chargedOldMemoryOwners = makeUnique<ConcurrentPtrHashSet>();
+        m_chargedOldMutableMemoryOwners = makeUnique<ConcurrentPtrHashSet>();
+        m_chargedOldSourceProvidersSinceLastFullCollect = makeUnique<UncheckedKeyHashSet<uint32_t>>();
+    }
+
     if (Options::forceFencedBarrier()) {
         m_mutatorShouldBeFenced = true;
         m_barrierThreshold = tautologicalThreshold;
@@ -692,6 +716,97 @@ void Heap::reportExtraMemoryAllocatedSlowCase(GCDeferralContext* deferralContext
             reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(cell, size);
     }
     collectIfNecessaryOrDefer(deferralContext);
+}
+
+size_t Heap::chargedOldBytesEstimate() const
+{
+    if (!hasOldGenerationLimit())
+        return 0;
+
+    size_t allocationDebt = m_chargedOldAllocationDebt.load(std::memory_order_acquire);
+    return saturatingAdd(chargedOldBytesAfterLastFullCollection(), allocationDebt);
+}
+
+void Heap::updateOldGenerationLimitAfterAllocation()
+{
+    if (hasOldGenerationLimit() && chargedOldBytesEstimate() >= m_maxOldGenerationSize)
+        m_oldGenerationLimitFullCollectionPending.store(true, std::memory_order_release);
+}
+
+void Heap::noteChargedOldMemoryAllocated(size_t size)
+{
+    if (!hasOldGenerationLimit() || !size)
+        return;
+    saturatingAtomicAdd(m_chargedOldAllocationDebt, size);
+    updateOldGenerationLimitAfterAllocation();
+}
+
+void Heap::reportChargedOldMemoryAllocated(size_t size)
+{
+    if (!hasOldGenerationLimit() || !size)
+        return;
+    noteChargedOldMemoryAllocated(size);
+    collectIfNecessaryOrDefer();
+}
+
+bool Heap::noteChargedOldMemoryAllocatedOnce(uint32_t ownerID, size_t size)
+{
+    if (!hasOldGenerationLimit() || !size)
+        return false;
+    {
+        Locker locker { m_chargedOldSourceProviderLock };
+        if (!m_chargedOldSourceProvidersSinceLastFullCollect->add(ownerID).isNewEntry)
+            return false;
+    }
+    noteChargedOldMemoryAllocated(size);
+    return true;
+}
+
+void Heap::rememberChargedOldSourceProvider(uint32_t ownerID)
+{
+    if (!hasOldGenerationLimit())
+        return;
+    Locker locker { m_chargedOldSourceProviderLock };
+    m_chargedOldSourceProvidersSinceLastFullCollect->add(ownerID);
+}
+
+void Heap::reportChargedOldMemoryVisited(size_t size)
+{
+    if (!hasOldGenerationLimit() || !size)
+        return;
+
+    saturatingAtomicAdd(m_chargedOldExtraMemorySize, size);
+}
+
+void Heap::reportChargedOldMemoryVisited(const void* owner, size_t size)
+{
+    if (size && addChargedOldMemoryOwner(owner))
+        reportChargedOldMemoryVisited(size);
+}
+
+void Heap::reportChargedOldStringVisited(const StringImpl* string)
+{
+    if (!string)
+        return;
+    if (const StringImpl* owner = string->oldGenerationOwnerDuringGC())
+        reportChargedOldMemoryVisited(owner, owner->oldGenerationCostDuringGC());
+}
+
+bool Heap::addChargedOldMemoryOwner(const void* owner)
+{
+    if (!hasOldGenerationLimit() || !owner || m_collectionScope != CollectionScope::Full)
+        return false;
+    return m_chargedOldMemoryOwners->add(const_cast<void*>(owner));
+}
+
+void Heap::addChargedOldMutableMemoryOwner(const JSCell* owner, void (*report)(const JSCell*, Heap&))
+{
+    if (!hasOldGenerationLimit() || !owner || !report || m_collectionScope != CollectionScope::Full)
+        return;
+    if (!m_chargedOldMutableMemoryOwners->add(const_cast<JSCell*>(owner)))
+        return;
+    Locker locker { m_chargedOldMutableMemoryOwnerLock };
+    m_chargedOldMutableMemoryOwnerCallbacks.append({ owner, report });
 }
 
 void Heap::deprecatedReportExtraMemorySlowCase(size_t size)
@@ -1014,6 +1129,9 @@ void Heap::updateObjectCounts()
     if (m_collectionScope && m_collectionScope.value() == CollectionScope::Full) {
         m_totalBytesVisitedAfterLastFullCollect = m_totalBytesVisited;
         m_totalBytesVisited = 0;
+
+        if (hasOldGenerationLimit())
+            m_chargedOldMarkedBytesThisFull = chargedOldBytesVisited();
     }
 
     m_totalBytesVisitedThisCycle = bytesVisited();
@@ -1713,6 +1831,10 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
         
     if (visitor.didReachTermination()) {
         m_opaqueRoots.deleteOldTables();
+        if (m_chargedOldMemoryOwners)
+            m_chargedOldMemoryOwners->deleteOldTables();
+        if (m_chargedOldMutableMemoryOwners)
+            m_chargedOldMutableMemoryOwners->deleteOldTables();
         
         m_scheduler->didReachTermination();
         
@@ -1907,11 +2029,28 @@ NEVER_INLINE bool Heap::runEndPhase(GCConductor conn)
         dataLog("p=", thisPauseMS, "ms (max ", maxPauseMS(thisPauseMS), "), cycle ", (m_afterGC - m_beforeGC).milliseconds(), "ms END]\n");
     }
     
+    bool shouldQueueOldGenerationFollowUp = hasOldGenerationLimit()
+        && m_oldGenerationLimitFullCollectionPending.load(std::memory_order_acquire)
+        && chargedOldBytesAfterLastFullCollection() <= m_maxOldGenerationSize;
     {
         Locker locker { *m_threadLock };
         m_requests.removeFirst();
         m_lastServedTicket++;
         clearMutatorWaiting();
+        if (shouldQueueOldGenerationFollowUp) {
+            GCRequest followUpRequest(CollectionScope::Full);
+            bool alreadyRequested = false;
+            for (const GCRequest& request : m_requests) {
+                if (followUpRequest.subsumedBy(request)) {
+                    alreadyRequested = true;
+                    break;
+                }
+            }
+            if (!alreadyRequested) {
+                m_requests.append(followUpRequest);
+                m_lastGrantedTicket++;
+            }
+        }
     }
     ParkingLot::unparkAll(&m_worldState);
 
@@ -2535,6 +2674,22 @@ void Heap::willStartCollection()
         m_sizeBeforeLastFullCollect = m_sizeAfterLastCollect + totalBytesAllocatedThisCycle();
         m_extraMemorySize = 0;
         m_deprecatedExtraMemorySize = 0;
+        if (hasOldGenerationLimit()) {
+            m_chargedOldAllocationDebt.store(0, std::memory_order_release);
+            m_chargedOldMarkedBytesThisFull = 0;
+            m_chargedOldExtraMemorySize.store(0, std::memory_order_release);
+            m_oldGenerationLimitFullCollectionPending.store(false, std::memory_order_release);
+            m_chargedOldMemoryOwners->clear();
+            m_chargedOldMutableMemoryOwners->clear();
+            {
+                Locker locker { m_chargedOldMutableMemoryOwnerLock };
+                m_chargedOldMutableMemoryOwnerCallbacks.clear();
+            }
+            {
+                Locker locker { m_chargedOldSourceProviderLock };
+                m_chargedOldSourceProvidersSinceLastFullCollect->clear();
+            }
+        }
 #if ENABLE(RESOURCE_USAGE)
         m_externalMemorySize = 0;
 #endif
@@ -2715,6 +2870,22 @@ void Heap::didFinishCollection()
     if (m_verifier) [[unlikely]]
         m_verifier->endGC();
 
+    if (scope == CollectionScope::Full && hasOldGenerationLimit()) {
+        Vector<std::pair<const JSCell*, void (*)(const JSCell*, Heap&)>> mutableMemoryOwners;
+        {
+            Locker locker { m_chargedOldMutableMemoryOwnerLock };
+            mutableMemoryOwners.swap(m_chargedOldMutableMemoryOwnerCallbacks);
+        }
+        for (auto [owner, report] : mutableMemoryOwners)
+            report(owner, *this);
+        size_t retainedBytes = saturatingAdd(m_chargedOldMarkedBytesThisFull, m_chargedOldExtraMemorySize.load(std::memory_order_acquire));
+        m_chargedOldBytesAfterLastFullCollect.store(retainedBytes, std::memory_order_release);
+        size_t allocationDebt = m_chargedOldAllocationDebt.load(std::memory_order_acquire);
+        bool needsFullCollection = retainedBytes > m_maxOldGenerationSize
+            || (allocationDebt && saturatingAdd(retainedBytes, allocationDebt) >= m_maxOldGenerationSize);
+        m_oldGenerationLimitFullCollectionPending.store(needsFullCollection, std::memory_order_release);
+    }
+
     RELEASE_ASSERT(m_collectionScope);
     m_lastCollectionScope = m_collectionScope;
     m_collectionScope = std::nullopt;
@@ -2773,6 +2944,12 @@ void Heap::didAllocate(size_t bytes)
         m_edenActivityCallback->didAllocate(*this, totalBytesAllocatedThisCycle() + m_bytesAbandonedSinceLastFullCollect);
 
     performIncrement(bytes);
+}
+
+void Heap::didAllocateCharged(size_t bytes)
+{
+    didAllocate(bytes);
+    noteChargedOldMemoryAllocated(bytes);
 }
 
 void Heap::addFinalizer(JSCell* cell, CFinalizer finalizer)
@@ -2866,6 +3043,28 @@ void Heap::setInitialAllocationBudget(size_t bytes)
 }
 #endif
 
+void Heap::serviceOldGenerationLimitBeforeEntry()
+{
+    RELEASE_ASSERT(vm().currentThreadIsHoldingAPILock());
+    if (!m_oldGenerationLimitFullCollectionPending.load(std::memory_order_acquire))
+        return;
+    if (!Options::useGC()) [[unlikely]]
+        return;
+    RELEASE_ASSERT(m_isSafeToCollect);
+    do {
+        collectNow(Sync, GCRequest(CollectionScope::Full));
+    } while (m_oldGenerationLimitFullCollectionPending.load(std::memory_order_acquire)
+        && chargedOldBytesAfterLastFullCollection() <= m_maxOldGenerationSize);
+}
+
+void Heap::serviceOldGenerationLimitIfPending()
+{
+    if (!hasOldGenerationLimit()
+        || !m_oldGenerationLimitFullCollectionPending.load(std::memory_order_acquire))
+        return;
+    collectIfNecessaryOrDefer();
+}
+
 bool Heap::shouldDoFullCollection()
 {
     if (!useGenerationalGC())
@@ -2931,6 +3130,16 @@ size_t Heap::bytesVisited()
     forEachSlotVisitor(
         [&] (SlotVisitor& visitor) {
             result += visitor.bytesVisited();
+        });
+    return result;
+}
+
+size_t Heap::chargedOldBytesVisited()
+{
+    size_t result = 0;
+    forEachSlotVisitor(
+        [&] (SlotVisitor& visitor) {
+            result = saturatingAdd(result, visitor.chargedOldBytesVisited());
         });
     return result;
 }
@@ -3016,6 +3225,18 @@ void Heap::collectIfNecessaryOrDefer(GCDeferralContext* deferralContext)
     }
     if (!Options::useGC()) [[unlikely]]
         return;
+
+    if (m_oldGenerationLimitFullCollectionPending.load(std::memory_order_acquire)) [[unlikely]] {
+        if (deferralContext)
+            deferralContext->m_shouldGC = true;
+        else if (isDeferred())
+            m_didDeferGCWork = true;
+        else {
+            collectAsync(GCRequest(CollectionScope::Full));
+            stopIfNecessary();
+        }
+        return;
+    }
     
     if (mayNeedToStop()) {
         if (deferralContext)

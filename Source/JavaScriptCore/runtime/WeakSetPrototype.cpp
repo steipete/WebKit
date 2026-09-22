@@ -102,6 +102,10 @@ JSC_DEFINE_HOST_FUNCTION(protoFuncWeakSetAdd, (JSGlobalObject* globalObject, Cal
     if (!canBeHeldWeakly(key)) [[unlikely]]
         return throwVMTypeError(globalObject, scope, WeakSetInvalidValueError);
     set->add(vm, key.asCell());
+    EnsureStillAliveScope ensureSetIsAlive(set);
+    EnsureStillAliveScope ensureKeyIsAlive(key);
+    vm.heap.serviceOldGenerationLimitIfPending();
+    RETURN_IF_EXCEPTION(scope, encodedJSValue());
     return JSValue::encode(callFrame->thisValue());
 }
 

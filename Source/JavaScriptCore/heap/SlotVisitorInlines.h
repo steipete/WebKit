@@ -184,6 +184,19 @@ inline void SlotVisitor::reportExtraMemoryVisited(size_t size)
     }
 }
 
+inline void SlotVisitor::reportChargedOldMemoryVisited(const void* owner, size_t size)
+{
+    if (!size || !m_isFirstVisit || !heap()->addChargedOldMemoryOwner(owner))
+        return;
+    m_chargedOldExtraMemorySize += size;
+}
+
+inline void SlotVisitor::reportChargedOldMutableMemoryVisited(const JSCell* owner, void (*report)(const JSCell*, Heap&))
+{
+    if (m_isFirstVisit)
+        heap()->addChargedOldMutableMemoryOwner(owner, report);
+}
+
 #if ENABLE(RESOURCE_USAGE)
 inline void SlotVisitor::reportExternalMemoryVisited(size_t size)
 {

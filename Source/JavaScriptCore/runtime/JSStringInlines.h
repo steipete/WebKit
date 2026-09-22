@@ -656,9 +656,14 @@ inline JSString* jsAtomString(JSGlobalObject* globalObject, VM& vm, JSString* st
     JSRopeString* ropeString = uncheckedDowncast<JSRopeString>(string);
 
     auto createFromRope = [&](VM& vm, auto& buffer) {
-        auto impl = AtomStringImpl::add(buffer);
+        size_t chargedMemory = 0;
+        auto impl = vm.heap.hasOldGenerationLimit()
+            ? AtomStringImpl::add(buffer, &chargedMemory)
+            : AtomStringImpl::add(buffer);
         size_t sizeToReport = impl->hasOneRef() ? impl->cost() : 0;
         ropeString->convertToNonRope(String { WTF::move(impl) });
+        if (chargedMemory)
+            vm.heap.noteChargedOldMemoryAllocated(chargedMemory);
         vm.heap.reportExtraMemoryAllocated(ropeString, sizeToReport);
         return ropeString;
     };

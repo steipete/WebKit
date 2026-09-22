@@ -28,6 +28,7 @@
 
 #include "ExceptionHelpers.h"
 #include "HashMapHelper.h"
+#include "Heap.h"
 #include "JSObject.h"
 #include <wtf/MallocPtr.h>
 
@@ -463,9 +464,12 @@ private:
     {
         ASSERT(!(capacity & (capacity - 1)));
 
+        uint32_t oldCapacity = m_capacity;
         m_buffer = WeakMapBufferType::create(capacity).leakPtr();
         m_capacity = capacity;
         ASSERT(m_buffer);
+        if (capacity > oldCapacity)
+            Heap::heap(this)->noteChargedOldMemoryAllocated((capacity - oldCapacity) * sizeof(WeakMapBucketType));
         assertBufferIsEmpty();
     }
 

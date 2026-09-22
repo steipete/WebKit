@@ -192,6 +192,8 @@ private:
         ASSERT_UNUSED(length, length > 0);
         ASSERT(!valueInternal().isNull());
         Base::finishCreation(vm);
+        if (vm.heap.hasOldGenerationLimit() && valueInternal().impl()->oldGenerationOwnerDuringGC())
+            vm.heap.noteChargedOldMemoryAllocated(cost);
         vm.heap.reportExtraMemoryAllocated(this, cost);
     }
 
@@ -200,6 +202,8 @@ private:
         ASSERT_UNUSED(length, length > 0);
         ASSERT(!valueInternal().isNull());
         Base::finishCreation(vm);
+        if (vm.heap.hasOldGenerationLimit() && valueInternal().impl()->oldGenerationOwnerDuringGC())
+            vm.heap.noteChargedOldMemoryAllocated(cost);
         vm.heap.reportExtraMemoryAllocated(deferralContext, this, cost);
     }
 

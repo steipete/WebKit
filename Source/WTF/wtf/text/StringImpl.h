@@ -327,6 +327,8 @@ public:
 
     size_t cost() const;
     size_t costDuringGC();
+    const StringImpl* oldGenerationOwnerDuringGC() const;
+    size_t oldGenerationCostDuringGC() const;
 
     WTF_EXPORT_PRIVATE size_t NODELETE sizeInBytes() const;
 
@@ -1152,6 +1154,27 @@ inline size_t StringImpl::costDuringGC()
     if (!is8Bit())
         result <<= 1;
     return divideRoundedUp<size_t>(result, refCount());
+}
+
+inline const StringImpl* StringImpl::oldGenerationOwnerDuringGC() const
+{
+    const StringImpl* owner = bufferOwnership() == BufferSubstring ? substringBuffer() : this;
+    if (owner->isStatic() || owner->bufferOwnership() == BufferExternal)
+        return nullptr;
+    if (owner->bufferOwnership() == BufferOwned)
+        return owner;
+    ASSERT(owner->bufferOwnership() == BufferInternal);
+    if (owner->is8Bit())
+        return owner->m_data8 == owner->tailPointer<Latin1Character>() ? owner : nullptr;
+    return owner->m_data16 == owner->tailPointer<char16_t>() ? owner : nullptr;
+}
+
+inline size_t StringImpl::oldGenerationCostDuringGC() const
+{
+    const StringImpl* owner = oldGenerationOwnerDuringGC();
+    if (!owner)
+        return 0;
+    return owner->length() * (owner->is8Bit() ? sizeof(Latin1Character) : sizeof(char16_t));
 }
 
 inline void StringImpl::setIsAtom(bool isAtom)

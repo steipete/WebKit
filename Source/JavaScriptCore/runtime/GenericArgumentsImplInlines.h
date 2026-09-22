@@ -278,7 +278,8 @@ void GenericArgumentsImpl<Type>::initModifiedArgumentsDescriptor(JSGlobalObject*
     RELEASE_ASSERT(!m_modifiedArgumentsDescriptor);
 
     if (argsLength) {
-        void* backingStore = vm.gigacageAuxiliarySpace(m_modifiedArgumentsDescriptor.kind).allocate(vm, WTF::roundUpToMultipleOf<8>(argsLength), nullptr, AllocationFailureMode::ReturnNull);
+        size_t backingStoreSize = WTF::roundUpToMultipleOf<8>(argsLength);
+        void* backingStore = vm.gigacageAuxiliarySpace(m_modifiedArgumentsDescriptor.kind).allocate(vm, backingStoreSize, nullptr, AllocationFailureMode::ReturnNull);
         if (!backingStore) [[unlikely]] {
             throwOutOfMemoryError(globalObject, scope);
             return;
@@ -287,6 +288,8 @@ void GenericArgumentsImpl<Type>::initModifiedArgumentsDescriptor(JSGlobalObject*
         m_modifiedArgumentsDescriptor.set(vm, this, modifiedArguments);
         for (unsigned i = argsLength; i--;)
             modifiedArguments[i] = false;
+        if (vm.heap.hasOldGenerationLimit())
+            vm.heap.noteChargedOldMemoryAllocated(backingStoreSize);
     }
 }
 

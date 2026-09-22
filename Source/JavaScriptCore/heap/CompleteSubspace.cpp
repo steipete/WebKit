@@ -193,7 +193,10 @@ void* CompleteSubspace::reallocatePreciseAllocationNonVirtual(VM& vm, HeapCell* 
     }
 
     m_space.m_preciseAllocations[oldIndexInSpace] = allocation;
-    vm.heap.didAllocate(difference);
+    if (this == &vm.primitiveGigacageAuxiliarySpace())
+        vm.heap.didAllocate(difference);
+    else
+        vm.heap.didAllocateCharged(difference);
     m_space.m_capacity += difference;
 
     m_preciseAllocations.append(allocation);
@@ -211,4 +214,3 @@ void CompleteSubspace::prepareAllAllocators()
 }
 
 } // namespace JSC
-

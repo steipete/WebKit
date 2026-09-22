@@ -175,6 +175,17 @@ void UnlinkedFunctionExecutable::visitChildrenImpl(JSCell* cell, Visitor& visito
     ASSERT_GC_OBJECT_INHERITS(thisObject, info());
     Base::visitChildren(thisObject, visitor);
 
+    if (visitor.heap()->hasOldGenerationLimit())
+        visitor.reportChargedOldMutableMemoryVisited(thisObject, [] (const JSCell* cell, Heap& heap) {
+            auto* executable = static_cast<const UnlinkedFunctionExecutable*>(cell);
+            if (executable->m_membersAreDeferred)
+                return;
+            if (const RareData* rareData = executable->m_members.live().rareData.get()) {
+                heap.reportChargedOldStringVisited(rareData->m_sourceURLDirective.impl());
+                heap.reportChargedOldStringVisited(rareData->m_sourceMappingURLDirective.impl());
+            }
+        });
+
     if (thisObject->codeBlockEdgeMayBeWeak()) {
         auto markIfProfitable = [&] (WriteBarrier<UnlinkedFunctionCodeBlock>& unlinkedCodeBlock) {
             if (!unlinkedCodeBlock)

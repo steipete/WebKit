@@ -318,6 +318,7 @@ public:
 
     unsigned size() const { return m_impl.size(); }
     unsigned capacity() const { return m_impl.capacity(); }
+    size_t byteSize() const { return m_impl.byteSize(); }
     bool isEmpty() const { return m_impl.isEmpty(); }
 
     void reserveInitialCapacity(unsigned keyCount) { m_impl.reserveInitialCapacity(keyCount); }

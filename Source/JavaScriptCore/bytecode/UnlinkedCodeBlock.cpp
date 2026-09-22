@@ -35,8 +35,11 @@
 #include "ExecutableInfo.h"
 #include "InstructionStream.h"
 #include "JSCJSValueInlines.h"
+#include "UnlinkedGlobalCodeBlock.h"
 #include "UnlinkedMetadataTableInlines.h"
+#include <wtf/CheckedArithmetic.h>
 #include <wtf/DataLog.h>
+#include <limits>
 
 namespace JSC {
 
@@ -93,6 +96,35 @@ void UnlinkedCodeBlock::initializeLoopHintExecutionCounter()
     }
 }
 
+size_t UnlinkedCodeBlock::chargedOldMemorySize(const AbstractLocker& locker)
+{
+    CheckedSize chargedMemory = metadataSizeInBytes();
+    if (m_instructions)
+        chargedMemory += m_instructions->ownedSizeInBytes();
+    if (hasRareData()) {
+        chargedMemory += m_rareData->sizeInBytes(locker);
+        for (const auto& jumpTable : m_rareData->m_unlinkedSwitchJumpTables)
+            chargedMemory += jumpTable.m_branchOffsets.byteSize();
+        for (const auto& jumpTable : m_rareData->m_unlinkedStringSwitchJumpTables)
+            chargedMemory += jumpTable.m_offsetTable.byteSize();
+        for (const BitVector& bitVector : m_rareData->m_bitVectors)
+            chargedMemory += bitVector.outOfLineMemoryUse();
+    }
+    if (m_expressionInfo)
+        chargedMemory += m_expressionInfo->byteSize();
+    chargedMemory += m_identifiers.byteSize();
+    chargedMemory += m_constantRegisters.byteSize();
+    chargedMemory += m_constantsSourceCodeRepresentation.byteSize();
+    chargedMemory += m_functionDecls.byteSize();
+    chargedMemory += m_functionExprs.byteSize();
+    chargedMemory += m_valueProfiles.byteSize();
+    chargedMemory += m_arrayProfiles.byteSize();
+    chargedMemory += m_binaryArithProfiles.byteSize();
+    chargedMemory += m_unaryArithProfiles.byteSize();
+    chargedMemory += m_outOfLineJumpTargets.byteSize();
+    return chargedMemory.hasOverflowed() ? std::numeric_limits<size_t>::max() : chargedMemory.value();
+}
+
 template<typename Visitor>
 void UnlinkedCodeBlock::visitChildrenImpl(JSCell* cell, Visitor& visitor)
 {
@@ -125,6 +157,30 @@ void UnlinkedCodeBlock::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     extraMemory += thisObject->m_functionExprs.byteSize();
 
     visitor.reportExtraMemoryVisited(extraMemory);
+
+    if (visitor.heap()->hasOldGenerationLimit())
+        visitor.reportChargedOldMutableMemoryVisited(thisObject, [] (const JSCell* cell, Heap& heap) {
+            auto* codeBlock = const_cast<UnlinkedCodeBlock*>(static_cast<const UnlinkedCodeBlock*>(cell));
+            ConcurrentJSLocker locker(codeBlock->m_lock);
+            heap.reportChargedOldMemoryVisited(codeBlock->chargedOldMemorySize(locker));
+            if (codeBlock->hasRareData()) {
+                for (const auto& jumpTable : codeBlock->m_rareData->m_unlinkedStringSwitchJumpTables) {
+                    for (const auto& entry : jumpTable.m_offsetTable)
+                        heap.reportChargedOldStringVisited(entry.key.get());
+                }
+                for (const auto& identifierSet : codeBlock->m_rareData->m_constantIdentifierSets) {
+                    for (const auto& identifier : identifierSet)
+                        heap.reportChargedOldStringVisited(identifier.get());
+                }
+            }
+            for (const Identifier& identifier : codeBlock->m_identifiers)
+                heap.reportChargedOldStringVisited(identifier.impl());
+            if (codeBlock->codeType() != FunctionCode) {
+                auto* globalCodeBlock = static_cast<const UnlinkedGlobalCodeBlock*>(codeBlock);
+                heap.reportChargedOldStringVisited(globalCodeBlock->sourceURLDirective());
+                heap.reportChargedOldStringVisited(globalCodeBlock->sourceMappingURLDirective());
+            }
+        });
 }
 
 DEFINE_VISIT_CHILDREN(UnlinkedCodeBlock);
@@ -160,8 +216,10 @@ ExpressionInfo& UnlinkedCodeBlock::expressionInfoSlow()
     if (!m_expressionInfo) {
         RELEASE_ASSERT(m_cachedExpressionInfo);
         std::unique_ptr<ExpressionInfo> expressionInfo = decodeBorrowedExpressionInfo(m_cachedExpressionInfo, m_cachedExpressionInfoBytes);
+        size_t chargedMemory = expressionInfo->byteSize();
         WTF::storeStoreFence(); // expressionInfo() and visitChildren read m_expressionInfo without m_lock
         m_expressionInfo = WTF::move(expressionInfo);
+        this->vm().heap.noteChargedOldMemoryAllocated(chargedMemory);
     }
     return *m_expressionInfo;
 }

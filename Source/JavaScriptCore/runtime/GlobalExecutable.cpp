@@ -40,6 +40,8 @@ void GlobalExecutable::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     auto* executable = uncheckedDowncast<GlobalExecutable>(cell);
     ASSERT_GC_OBJECT_INHERITS(executable, info());
     Base::visitChildren(executable, visitor);
+    if (visitor.heap()->hasOldGenerationLimit())
+        executable->reportChargedOldMemory(visitor);
     visitor.append(executable->m_unlinkedCodeBlock);
 
     if (auto* codeBlock = executable->codeBlock()) {

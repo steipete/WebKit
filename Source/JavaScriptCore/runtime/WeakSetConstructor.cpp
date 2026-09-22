@@ -82,19 +82,25 @@ JSC_DEFINE_HOST_FUNCTION(constructWeakSet, (JSGlobalObject* globalObject, CallFr
     bool canPerformFastAdd = adderFunctionCallData.type == CallData::Type::Native && adderFunctionCallData.native.function == protoFuncWeakSetAdd;
 
     scope.release();
-    forEachInIterable(globalObject, iterable, [&](VM&, JSGlobalObject* globalObject, JSValue nextValue) {
+    forEachInIterable(globalObject, iterable, [&](VM& vm, JSGlobalObject* globalObject, JSValue nextValue) {
+        auto scope = DECLARE_THROW_SCOPE(vm);
         if (canPerformFastAdd) {
             if (!canBeHeldWeakly(nextValue)) [[unlikely]] {
                 throwTypeError(asObject(adderFunction)->realm(), scope, WeakSetInvalidValueError);
                 return;
             }
             weakSet->add(vm, nextValue.asCell());
+            EnsureStillAliveScope ensureWeakSetIsAlive(weakSet);
+            EnsureStillAliveScope ensureValueIsAlive(nextValue);
+            vm.heap.serviceOldGenerationLimitIfPending();
+            RETURN_IF_EXCEPTION(scope, void());
             return;
         }
 
         auto arguments = WTF::toArray<EncodedJSValue>({
             JSValue::encode(nextValue),
         });
+        scope.release();
         call(globalObject, adderFunction, adderFunctionCallData, weakSet, ArgList { arguments.data(), arguments.size() });
     });
 

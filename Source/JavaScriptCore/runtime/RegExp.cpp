@@ -31,8 +31,10 @@
 #include "YarrSyntaxChecker.h"
 #include <wtf/Assertions.h>
 #include <wtf/Atomics.h>
+#include <wtf/CheckedArithmetic.h>
 #include <wtf/DataLog.h>
 #include <wtf/text/MakeString.h>
+#include <limits>
 
 namespace JSC {
 
@@ -178,6 +180,8 @@ void RegExp::finishCreation(VM& vm)
         if (!summary.hasNamedCaptureGroups && !summary.isOnlyPatternCharacters && summary.maxParenthesesDepth <= maxLazilyConstructedParenthesesDepth) {
             m_numSubpatterns = summary.numSubpatterns;
             m_ovector = FixedVector<int>(offsetVectorBaseForNamedCaptures());
+            if (vm.heap.hasOldGenerationLimit())
+                vm.heap.noteChargedOldMemoryAllocated(m_ovector.byteSize());
             return;
         }
     }
@@ -194,6 +198,8 @@ void RegExp::finishCreation(VM& vm)
     if (hasNamedCaptures())
         offsetVectorSize += m_rareData->m_numDuplicateNamedCaptureGroups;
     m_ovector = FixedVector<int>(offsetVectorSize);
+    if (vm.heap.hasOldGenerationLimit())
+        vm.heap.noteChargedOldMemoryAllocated(m_ovector.byteSize());
 }
 
 void RegExp::updateMetadataFromPattern(Yarr::YarrPattern& pattern)
@@ -219,6 +225,18 @@ void RegExp::updateMetadataFromPattern(Yarr::YarrPattern& pattern)
         // The concurrent GC thread reads m_rareData in visitChildren, so it must observe a fully initialized RareData.
         WTF::storeStoreFence();
         m_rareData = WTF::move(rareData);
+        if (Heap::heap(this)->hasOldGenerationLimit()) {
+            CheckedSize rareDataSize = sizeof(RareData) + m_rareData->m_captureGroupNames.byteSize();
+            CheckedSize mapBytes = m_rareData->m_namedGroupToParenIndices.capacity();
+            mapBytes *= sizeof(typename decltype(m_rareData->m_namedGroupToParenIndices)::KeyValuePairType);
+            rareDataSize += mapBytes;
+            for (const auto& entry : m_rareData->m_namedGroupToParenIndices) {
+                CheckedSize valuesBytes = entry.value.capacity();
+                valuesBytes *= sizeof(unsigned);
+                rareDataSize += valuesBytes;
+            }
+            Heap::heap(this)->noteChargedOldMemoryAllocated(rareDataSize.hasOverflowed() ? std::numeric_limits<size_t>::max() : rareDataSize.value());
+        }
     }
 }
 
@@ -245,14 +263,58 @@ size_t RegExp::estimatedSize(JSCell* cell, VM& vm)
     return Base::estimatedSize(cell, vm) + regexDataSize;
 }
 
+size_t RegExp::chargedOldMemorySize() const
+{
+    CheckedSize result = m_regExpBytecode ? m_regExpBytecode->estimatedSizeInBytes() : 0;
+#if ENABLE(YARR_JIT)
+    if (auto* jitCode = m_regExpJITCode.get())
+        result += jitCode->size();
+#endif
+    result += m_ovector.byteSize();
+    if (m_rareData) {
+        result += sizeof(RareData) + m_rareData->m_captureGroupNames.byteSize();
+        CheckedSize mapBytes = m_rareData->m_namedGroupToParenIndices.capacity();
+        mapBytes *= sizeof(typename decltype(m_rareData->m_namedGroupToParenIndices)::KeyValuePairType);
+        result += mapBytes;
+        for (const auto& entry : m_rareData->m_namedGroupToParenIndices) {
+            CheckedSize valuesBytes = entry.value.capacity();
+            valuesBytes *= sizeof(unsigned);
+            result += valuesBytes;
+        }
+    }
+    return result.hasOverflowed() ? std::numeric_limits<size_t>::max() : result.value();
+}
+
 template<typename Visitor>
 void RegExp::visitChildrenImpl(JSCell* cell, Visitor& visitor)
 {
     auto* thisObject = uncheckedDowncast<RegExp>(cell);
     ASSERT_GC_OBJECT_INHERITS(thisObject, info());
     Base::visitChildren(thisObject, visitor);
+    Locker locker { thisObject->cellLock() };
     if (thisObject->m_rareData)
         visitor.append(thisObject->m_rareData->m_cachedGroupsStructureID);
+    if (!visitor.heap()->hasOldGenerationLimit())
+        return;
+    visitor.reportChargedOldMutableMemoryVisited(thisObject, [] (const JSCell* cell, Heap& heap) {
+        auto* regExp = static_cast<const RegExp*>(cell);
+        Locker locker { regExp->cellLock() };
+        heap.reportChargedOldMemoryVisited(regExp->chargedOldMemorySize());
+        auto reportString = [&] (StringImpl* string) {
+            if (string) {
+                if (const StringImpl* owner = string->oldGenerationOwnerDuringGC())
+                    heap.reportChargedOldMemoryVisited(owner, owner->oldGenerationCostDuringGC());
+            }
+        };
+        reportString(regExp->m_patternString.impl());
+        reportString(regExp->m_atom.impl());
+        if (regExp->m_rareData) {
+            for (const AtomString& name : regExp->m_rareData->m_captureGroupNames)
+                reportString(name.impl());
+            for (const auto& entry : regExp->m_rareData->m_namedGroupToParenIndices)
+                reportString(entry.key.impl());
+        }
+    });
 }
 
 DEFINE_VISIT_CHILDREN(RegExp);
@@ -305,6 +367,8 @@ void RegExp::finishCreationFromCache(VM& vm, unsigned numSubpatterns, String&& a
     m_specificPattern = specificPattern;
     m_numSubpatterns = numSubpatterns;
     m_ovector = FixedVector<int>(offsetVectorBaseForNamedCaptures());
+    if (vm.heap.hasOldGenerationLimit())
+        vm.heap.noteChargedOldMemoryAllocated(m_ovector.byteSize());
 }
 
 
@@ -334,6 +398,8 @@ void RegExp::byteCodeCompileIfNecessary(VM* vm)
         m_state = ParseError;
         return;
     }
+    if (vm->heap.hasOldGenerationLimit())
+        vm->heap.noteChargedOldMemoryAllocated(m_regExpBytecode->estimatedSizeInBytes());
 }
 
 void RegExp::compile(VM* vm, Yarr::CharSize charSize, std::optional<StringView> sampleString)
@@ -362,7 +428,10 @@ void RegExp::compile(VM* vm, Yarr::CharSize charSize, std::optional<StringView> 
         && (!pattern.m_containsLookbehinds || Options::useRegExpLookbehindJIT())
         ) {
         auto& jitCode = ensureRegExpJITCode();
+        size_t oldJITSize = vm->heap.hasOldGenerationLimit() ? jitCode.size() : 0;
         Yarr::jitCompile(pattern, m_patternString, charSize, sampleString, vm, jitCode, Yarr::ExecutionMode::IncludeSubpatterns);
+        if (vm->heap.hasOldGenerationLimit() && jitCode.size() > oldJITSize)
+            vm->heap.noteChargedOldMemoryAllocated(jitCode.size() - oldJITSize);
         if (!jitCode.failureReason()) {
             m_state = JITCode;
             m_minimumSize = pattern.m_body->m_minimumSize;
@@ -382,6 +451,8 @@ void RegExp::compile(VM* vm, Yarr::CharSize charSize, std::optional<StringView> 
         m_state = ParseError;
         return;
     }
+    if (vm->heap.hasOldGenerationLimit())
+        vm->heap.noteChargedOldMemoryAllocated(m_regExpBytecode->estimatedSizeInBytes());
     m_minimumSize = pattern.m_body->m_minimumSize;
 }
 
@@ -450,7 +521,10 @@ void RegExp::compileMatchOnly(VM* vm, Yarr::CharSize charSize, std::optional<Str
         && (!pattern.m_containsLookbehinds || Options::useRegExpLookbehindJIT())
         ) {
         auto& jitCode = ensureRegExpJITCode();
+        size_t oldJITSize = vm->heap.hasOldGenerationLimit() ? jitCode.size() : 0;
         Yarr::jitCompile(pattern, m_patternString, charSize, sampleString, vm, jitCode, Yarr::ExecutionMode::MatchOnly);
+        if (vm->heap.hasOldGenerationLimit() && jitCode.size() > oldJITSize)
+            vm->heap.noteChargedOldMemoryAllocated(jitCode.size() - oldJITSize);
         if (!jitCode.failureReason()) {
             m_state = JITCode;
             m_minimumSize = pattern.m_body->m_minimumSize;
@@ -479,6 +553,8 @@ void RegExp::compileMatchOnly(VM* vm, Yarr::CharSize charSize, std::optional<Str
         m_state = ParseError;
         return;
     }
+    if (vm->heap.hasOldGenerationLimit())
+        vm->heap.noteChargedOldMemoryAllocated(m_regExpBytecode->estimatedSizeInBytes());
     m_minimumSize = bytecodePattern.m_body->m_minimumSize;
 }
 

@@ -118,7 +118,13 @@ JSC_DEFINE_HOST_FUNCTION(protoFuncWeakMapSet, (JSGlobalObject* globalObject, Cal
     JSValue key = callFrame->argument(0);
     if (!canBeHeldWeakly(key)) [[unlikely]]
         return throwVMTypeError(globalObject, scope, WeakMapInvalidKeyError);
-    map->set(vm, key.asCell(), callFrame->argument(1));
+    JSValue value = callFrame->argument(1);
+    map->set(vm, key.asCell(), value);
+    EnsureStillAliveScope ensureMapIsAlive(map);
+    EnsureStillAliveScope ensureKeyIsAlive(key);
+    EnsureStillAliveScope ensureValueIsAlive(value);
+    vm.heap.serviceOldGenerationLimitIfPending();
+    RETURN_IF_EXCEPTION(scope, encodedJSValue());
     return JSValue::encode(callFrame->thisValue());
 }
 
@@ -141,6 +147,7 @@ JSC_DEFINE_HOST_FUNCTION(protoFuncWeakMapGetOrInsert, (JSGlobalObject* globalObj
     auto hash = jsWeakMapHash(keyCell);
 
     JSValue value;
+    bool didAdd = false;
 
     {
         AssertNoGC assertNoGC;
@@ -151,7 +158,16 @@ JSC_DEFINE_HOST_FUNCTION(protoFuncWeakMapGetOrInsert, (JSGlobalObject* globalObj
         else {
             value = callFrame->argument(1);
             map->addBucket(vm, keyCell, value, hash, index);
+            didAdd = true;
         }
+    }
+
+    if (didAdd) {
+        EnsureStillAliveScope ensureMapIsAlive(map);
+        EnsureStillAliveScope ensureKeyIsAlive(key);
+        EnsureStillAliveScope ensureValueIsAlive(value);
+        vm.heap.serviceOldGenerationLimitIfPending();
+        RETURN_IF_EXCEPTION(scope, encodedJSValue());
     }
 
     return JSValue::encode(value);
@@ -208,6 +224,12 @@ JSC_DEFINE_HOST_FUNCTION(protoFuncWeakMapGetOrInsertComputed, (JSGlobalObject* g
         AssertNoGC assertNoGC;
         map->add(vm, keyCell, value, hash);
     }
+
+    EnsureStillAliveScope ensureMapIsAlive(map);
+    EnsureStillAliveScope ensureKeyIsAlive(key);
+    EnsureStillAliveScope ensureValueIsAlive(value);
+    vm.heap.serviceOldGenerationLimitIfPending();
+    RETURN_IF_EXCEPTION(scope, encodedJSValue());
 
     return JSValue::encode(value);
 }

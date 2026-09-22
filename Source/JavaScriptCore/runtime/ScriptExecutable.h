@@ -32,6 +32,7 @@
 
 namespace JSC {
 
+class AbstractSlotVisitor;
 class JSArray;
 class JSTemplateObjectDescriptor;
 class IsoCellSet;
@@ -136,6 +137,7 @@ private:
 
 protected:
     ScriptExecutable(Structure*, VM&, const SourceCode&, LexicallyScopedFeatures, DerivedContextType, bool isInArrowFunctionContext, bool isInsideOrdinaryFunction, EvalContextType, Intrinsic);
+    void reportChargedOldMemory(AbstractSlotVisitor&) const;
 
     void recordParse(CodeFeatures features, LexicallyScopedFeatures lexicallyScopedFeatures, bool hasCapturedVariables)
     {

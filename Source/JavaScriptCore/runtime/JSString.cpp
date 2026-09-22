@@ -107,6 +107,18 @@ void JSString::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     ASSERT_GC_OBJECT_INHERITS(thisObject, info());
     Base::visitChildren(thisObject, visitor);
 
+    if (visitor.heap()->hasOldGenerationLimit())
+        visitor.reportChargedOldMutableMemoryVisited(thisObject, [] (const JSCell* cell, Heap& heap) {
+            auto* string = static_cast<const JSString*>(cell);
+            uintptr_t pointer = string->fiberConcurrently();
+            if (pointer & isRopeInPointer)
+                return;
+            if (auto* impl = std::bit_cast<StringImpl*>(pointer)) {
+                if (const StringImpl* owner = impl->oldGenerationOwnerDuringGC())
+                    heap.reportChargedOldMemoryVisited(owner, owner->oldGenerationCostDuringGC());
+            }
+        });
+
     uintptr_t pointer = thisObject->fiberConcurrently();
     if (pointer & isRopeInPointer) {
         if (pointer & JSRopeString::isSubstringInPointer) {
@@ -166,23 +178,33 @@ GCOwnedDataScope<AtomStringImpl*> JSRopeString::resolveRopeToAtomString(JSGlobal
     }
 
     AtomString atomString;
+    size_t chargedMemory = 0;
+    auto atomize = [&] (auto characters) {
+        if (vm.heap.hasOldGenerationLimit())
+            return AtomString { AtomStringImpl::add(characters, &chargedMemory) };
+        return AtomString { characters };
+    };
     uint8_t* stackLimit = std::bit_cast<uint8_t*>(vm.softStackLimit());
     if (!isSubstring()) {
         if (is8Bit()) {
             std::array<Latin1Character, maxLengthForOnStackResolve> buffer;
             resolveRopeInternalNoSubstring(std::span { buffer }.first(length()), stackLimit);
-            atomString = std::span<const Latin1Character> { buffer }.first(length());
+            atomString = atomize(std::span<const Latin1Character> { buffer }.first(length()));
         } else {
             std::array<char16_t, maxLengthForOnStackResolve> buffer;
             resolveRopeInternalNoSubstring(std::span { buffer }.first(length()), stackLimit);
-            atomString = std::span<const char16_t> { buffer }.first(length());
+            atomString = atomize(std::span<const char16_t> { buffer }.first(length()));
         }
-    } else
-        atomString = StringView { substringBase()->valueInternal() }.substring(substringOffset(), length()).toAtomString();
+    } else {
+        StringView view = StringView { substringBase()->valueInternal() }.substring(substringOffset(), length());
+        atomString = view.is8Bit() ? atomize(view.span8()) : atomize(view.span16());
+    }
 
     size_t sizeToReport = atomString.impl()->hasOneRef() ? atomString.impl()->cost() : 0;
     convertToNonRope(String { atomString.releaseImpl() });
     // If we resolved a string that didn't previously exist, notify the heap that we've grown.
+    if (chargedMemory)
+        vm.heap.noteChargedOldMemoryAllocated(chargedMemory);
     vm.heap.reportExtraMemoryAllocated(this, sizeToReport);
     return { this, static_cast<AtomStringImpl*>(valueInternal().impl()) };
 }
@@ -253,8 +275,11 @@ const String& JSRopeString::resolveRopeWithFunction(JSGlobalObject* nullOrGlobal
         uint8_t* stackLimit = std::bit_cast<uint8_t*>(vm.softStackLimit());
         resolveRopeInternalNoSubstring(buffer, stackLimit);
         convertToNonRope(function(newImpl.releaseNonNull()));
-        if constexpr (reportAllocation)
+        if constexpr (reportAllocation) {
+            if (vm.heap.hasOldGenerationLimit())
+                vm.heap.noteChargedOldMemoryAllocated(sizeToReport);
             vm.heap.reportExtraMemoryAllocated(this, sizeToReport);
+        }
         return valueInternal();
     }
     
@@ -269,8 +294,11 @@ const String& JSRopeString::resolveRopeWithFunction(JSGlobalObject* nullOrGlobal
     uint8_t* stackLimit = std::bit_cast<uint8_t*>(vm.softStackLimit());
     resolveRopeInternalNoSubstring(buffer, stackLimit);
     convertToNonRope(function(newImpl.releaseNonNull()));
-    if constexpr (reportAllocation)
+    if constexpr (reportAllocation) {
+        if (vm.heap.hasOldGenerationLimit())
+            vm.heap.noteChargedOldMemoryAllocated(sizeToReport);
         vm.heap.reportExtraMemoryAllocated(this, sizeToReport);
+    }
     return valueInternal();
 }
 

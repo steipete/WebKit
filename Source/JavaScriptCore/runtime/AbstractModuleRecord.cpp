@@ -45,11 +45,14 @@
 #include "JSPromiseReaction.h"
 #endif
 #include "ObjectConstructor.h"
+#include "SourceProvider.h"
 #include "SyntheticModuleRecord.h"
 #include "VMTrapsInlines.h"
 #include "WebAssemblyModuleRecord.h"
 #include <wtf/text/MakeString.h>
 #include "HeapAnalyzer.h"
+#include <wtf/CheckedArithmetic.h>
+#include <limits>
 
 namespace JSC {
 namespace AbstractModuleRecordInternal {
@@ -112,7 +115,104 @@ void AbstractModuleRecord::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     visitor.append(thisObject->m_asyncParentModules.begin(), thisObject->m_asyncParentModules.end());
     for (const auto& [key, loadedModule] : thisObject->m_loadedModules)
         visitor.append(loadedModule.m_module);
+    if (visitor.heap()->hasOldGenerationLimit())
+        visitor.reportChargedOldMutableMemoryVisited(thisObject, [] (const JSCell* cell, Heap& heap) {
+            auto* record = static_cast<const AbstractModuleRecord*>(cell);
+            heap.reportChargedOldMemoryVisited(record->chargedOldContainerMemorySize());
+            auto reportIdentifier = [&] (const Identifier& identifier) {
+                heap.reportChargedOldStringVisited(identifier.impl());
+            };
+            auto reportFetchParameters = [&] (const ScriptFetchParameters* parameters) {
+                if (!parameters)
+                    return;
+                heap.reportChargedOldStringVisited(parameters->integrity().impl());
+#if USE(BUN_JSC_ADDITIONS)
+                heap.reportChargedOldStringVisited(parameters->hostDefinedImportType().impl());
+                for (const auto& entry : parameters->attributes()) {
+                    heap.reportChargedOldStringVisited(entry.key.get());
+                    heap.reportChargedOldStringVisited(entry.value.impl());
+                }
+#endif
+            };
+            auto reportModuleRequest = [&] (const ModuleRequest& request) {
+                reportIdentifier(request.m_specifier);
+                reportFetchParameters(request.m_attributes.get());
+            };
+
+            reportIdentifier(record->m_moduleKey);
+            for (const ModuleRequest& request : record->m_requestedModules)
+                reportModuleRequest(request);
+            for (const auto& entry : record->m_starExportEntries)
+                heap.reportChargedOldStringVisited(entry.first.get());
+            for (const auto& pair : record->m_importEntries) {
+                heap.reportChargedOldStringVisited(pair.key.get());
+                reportIdentifier(pair.value.moduleRequest);
+                reportIdentifier(pair.value.importName);
+                reportIdentifier(pair.value.localName);
+            }
+            for (const auto& pair : record->m_exportEntries) {
+                heap.reportChargedOldStringVisited(pair.key.get());
+                reportIdentifier(pair.value.exportName);
+                reportIdentifier(pair.value.moduleName);
+                reportIdentifier(pair.value.importName);
+                reportIdentifier(pair.value.localName);
+            }
+            for (const auto& [key, loadedModule] : record->m_loadedModules) {
+                heap.reportChargedOldStringVisited(key.first);
+                reportModuleRequest(loadedModule);
+            }
+#if USE(BUN_JSC_ADDITIONS)
+            for (const Resolution& resolution : record->m_prelinkedImportResolutions)
+                reportIdentifier(resolution.localName);
+#endif
+            if (record->inherits(JSModuleRecord::info())) {
+                auto* moduleRecord = static_cast<const JSModuleRecord*>(record);
+                if (SourceProvider* provider = moduleRecord->sourceCode().provider())
+                    provider->reportChargedOldMutableMemory(heap);
+            }
+        });
 }
+
+size_t AbstractModuleRecord::chargedOldContainerMemorySize() const
+{
+    CheckedSize result = 0;
+    result += m_starExportEntries.byteSize();
+    CheckedSize requestedModulesBytes = m_requestedModules.capacity();
+    requestedModulesBytes *= sizeof(ModuleRequest);
+    result += requestedModulesBytes;
+    result += m_exportEntries.byteSize();
+    result += m_importEntries.byteSize();
+    result += m_loadedModules.byteSize();
+    CheckedSize asyncParentModulesBytes = m_asyncParentModules.capacity();
+    asyncParentModulesBytes *= sizeof(WriteBarrier<AbstractModuleRecord>);
+    result += asyncParentModulesBytes;
+#if USE(BUN_JSC_ADDITIONS)
+    result += m_prelinkedImportResolutions.byteSize();
+#endif
+    return result.hasOverflowed() ? std::numeric_limits<size_t>::max() : result.value();
+}
+
+void AbstractModuleRecord::updateChargedOldContainerMemory(Heap& heap)
+{
+    if (!heap.hasOldGenerationLimit())
+        return;
+    size_t oldSize = m_chargedOldContainerBytes.load(std::memory_order_relaxed);
+    size_t newSize = chargedOldContainerMemorySize();
+    m_chargedOldContainerBytes.store(newSize, std::memory_order_release);
+    if (newSize > oldSize)
+        heap.noteChargedOldMemoryAllocated(newSize - oldSize);
+}
+
+#if USE(BUN_JSC_ADDITIONS)
+void AbstractModuleRecord::reserveCapacity(unsigned requestedModules, unsigned importEntries, unsigned exportEntries)
+{
+    Heap* heap = Heap::heap(this);
+    m_requestedModules.reserveInitialCapacity(requestedModules);
+    m_importEntries.reserveInitialCapacity(importEntries);
+    m_exportEntries.reserveInitialCapacity(exportEntries);
+    updateChargedOldContainerMemory(*heap);
+}
+#endif
 
 DEFINE_VISIT_CHILDREN(AbstractModuleRecord);
 
@@ -120,13 +220,12 @@ size_t AbstractModuleRecord::estimatedSize(JSCell* cell, VM& vm)
 {
     size_t size = Base::estimatedSize(cell, vm);
     auto* thisObject = uncheckedDowncast<AbstractModuleRecord>(cell);
-    size += thisObject->m_starExportEntries.capacity() * sizeof(ExportEntry);
+    size += thisObject->m_starExportEntries.byteSize();
     size += thisObject->m_requestedModules.capacity() * sizeof(ModuleRequest);
-    // OrderedHashMap does not expose byteSize(); approximate with capacity * entry size.
-    size += thisObject->m_exportEntries.capacity() * (sizeof(RefPtr<UniquedStringImpl>) + sizeof(ExportEntry));
-    size += thisObject->m_importEntries.capacity() * (sizeof(RefPtr<UniquedStringImpl>) + sizeof(ImportEntry));
+    size += thisObject->m_exportEntries.byteSize();
+    size += thisObject->m_importEntries.byteSize();
 #if USE(BUN_JSC_ADDITIONS)
-    size += thisObject->m_prelinkedImportResolutions.size() * sizeof(Resolution);
+    size += thisObject->m_prelinkedImportResolutions.byteSize();
 #endif
     return size;
 }
@@ -163,28 +262,36 @@ bool AbstractModuleRecord::ModuleRequest::operator==(const ModuleRequest& other)
 
 void AbstractModuleRecord::appendRequestedModule(const Identifier& moduleName, RefPtr<ScriptFetchParameters>&& attributes, ModulePhase phase)
 {
+    Heap* heap = Heap::heap(this);
     m_requestedModules.append({ moduleName, WTF::move(attributes), phase });
+    updateChargedOldContainerMemory(*heap);
 }
 
 void AbstractModuleRecord::addStarExportEntry(const Identifier& moduleName, ScriptFetchParameters::Type moduleRequestType)
 {
+    Heap* heap = Heap::heap(this);
     m_starExportEntries.add({ moduleName.impl(), moduleRequestType });
+    updateChargedOldContainerMemory(*heap);
 }
 
 void AbstractModuleRecord::addImportEntry(const ImportEntry& entry)
 {
+    Heap* heap = Heap::heap(this);
     bool isNewEntry = m_importEntries.add(entry.localName.impl(), entry).isNewEntry;
     UNUSED_PARAM(isNewEntry);
     // This is guaranteed by the parser.
     ASSERT_WITH_MESSAGE(isNewEntry, "Duplicate import entry name '%s'", entry.localName.impl()->utf8().data());
+    updateChargedOldContainerMemory(*heap);
 }
 
 void AbstractModuleRecord::addExportEntry(const ExportEntry& entry)
 {
+    Heap* heap = Heap::heap(this);
     bool isNewEntry = m_exportEntries.add(entry.exportName.impl(), entry).isNewEntry;
     UNUSED_PARAM(isNewEntry);
     // This is guaranteed by the parser.
     ASSERT_WITH_MESSAGE(isNewEntry, "Duplicate export entry name '%s'", entry.exportName.impl()->utf8().data());
+    updateChargedOldContainerMemory(*heap);
 }
 
 auto AbstractModuleRecord::tryGetImportEntry(UniquedStringImpl* localName) -> std::optional<ImportEntry>
@@ -258,7 +365,7 @@ AbstractModuleRecord* AbstractModuleRecord::hostResolveImportedModule(JSGlobalOb
 }
 
 #if USE(BUN_JSC_ADDITIONS)
-void AbstractModuleRecord::initializePrelinked(VM&, Ref<PrelinkedModuleGraph>&& graph, uint32_t moduleIndex)
+void AbstractModuleRecord::initializePrelinked(VM& vm, Ref<PrelinkedModuleGraph>&& graph, uint32_t moduleIndex)
 {
     ASSERT(!m_prelinked && m_requestedModules.isEmpty());
     m_prelinked = WTF::move(graph);
@@ -271,6 +378,7 @@ void AbstractModuleRecord::initializePrelinked(VM&, Ref<PrelinkedModuleGraph>&& 
         const auto& request = requests[i];
         return ModuleRequest { m_prelinked->identifier(request.specifierSid), m_prelinked->fetchParameters(request), request.isDeferred() ? ModulePhase::Defer : ModulePhase::Evaluation };
     });
+    updateChargedOldContainerMemory(vm.heap);
 }
 
 // The eager form for when Options::usePrelinkedModuleInfo() is off: the by-name entry maps are built from the graph now
@@ -282,6 +390,7 @@ void AbstractModuleRecord::convertPrelinkedToEager()
     m_prelinkedImportResolutions.clear();
     m_prelinked = nullptr;
     m_prelinkedEntriesMaterialized = false;
+    updateChargedOldContainerMemory(this->vm().heap);
 }
 
 AbstractModuleRecord* AbstractModuleRecord::prelinkedRequestedModule(unsigned requestIndex) const
@@ -345,6 +454,7 @@ void AbstractModuleRecord::materializePrelinkedEntries()
 
     auto imports = graph.imports(module);
     m_importEntries.reserveInitialCapacity(imports.size());
+    updateChargedOldContainerMemory(vm.heap);
     for (const auto& import : imports) {
         ImportEntryType type = ImportEntryType::Single;
         ModulePhase phase = ModulePhase::Evaluation;
@@ -366,6 +476,7 @@ void AbstractModuleRecord::materializePrelinkedEntries()
 
     auto exports = graph.exports(module);
     m_exportEntries.reserveInitialCapacity(exports.size());
+    updateChargedOldContainerMemory(vm.heap);
     for (const auto& entry : exports) {
         Identifier exportName = graph.identifier(entry.exportSid);
         switch (entry.kind()) {
@@ -397,6 +508,7 @@ void AbstractModuleRecord::materializePrelinkedEntries()
             return LoadedModuleRequest { vm, request, loaded, this };
         });
     }
+    updateChargedOldContainerMemory(vm.heap);
 }
 
 AbstractModuleRecord* AbstractModuleRecord::prelinkedRecordForResolution(JSGlobalObject*, uint32_t moduleIndex) const
@@ -457,8 +569,10 @@ auto AbstractModuleRecord::tryResolveImportPrelinked(JSGlobalObject* globalObjec
     if (!import)
         return Resolution::notFound();
     auto imports = m_prelinked->imports(module);
-    if (m_prelinkedImportResolutions.size() != imports.size()) [[unlikely]]
+    if (m_prelinkedImportResolutions.size() != imports.size()) [[unlikely]] {
         m_prelinkedImportResolutions = FixedVector<Resolution>(imports.size());
+        updateChargedOldContainerMemory(globalObject->vm().heap);
+    }
     Resolution& memo = m_prelinkedImportResolutions[import - imports.data()];
     if (memo.moduleRecord || memo.type != Resolution::Type::Resolved) [[likely]]
         return memo;
@@ -553,9 +667,12 @@ void AbstractModuleRecord::setImportedModule(JSGlobalObject* globalObject, const
     // ModuleRequest (specifier + attributes) so a `with { type: "json" }` /
     // HostDefined import lands in the same (specifier, type) bucket that
     // getImportedModule()'s typed lookup will use.
-    Locker locker { cellLock() };
-    ModuleMapKey key { request.m_specifier.impl(), request.type() };
-    m_loadedModules.set(key, LoadedModuleRequest { vm, request, record, this });
+    {
+        Locker locker { cellLock() };
+        ModuleMapKey key { request.m_specifier.impl(), request.type() };
+        m_loadedModules.set(key, LoadedModuleRequest { vm, request, record, this });
+        updateChargedOldContainerMemory(vm.heap);
+    }
 }
 
 auto AbstractModuleRecord::resolveImport(JSGlobalObject* globalObject, const Identifier& localName) -> Resolution
@@ -2054,8 +2171,11 @@ void AbstractModuleRecord::setHasTLA(bool has)
 
 void AbstractModuleRecord::appendAsyncParentModule(VM& vm, AbstractModuleRecord* parentModule)
 {
-    Locker locker { cellLock() };
-    m_asyncParentModules.append({ vm, this, parentModule });
+    {
+        Locker locker { cellLock() };
+        m_asyncParentModules.append({ vm, this, parentModule });
+        updateChargedOldContainerMemory(vm.heap);
+    }
 }
 
 void AbstractModuleRecord::dump()

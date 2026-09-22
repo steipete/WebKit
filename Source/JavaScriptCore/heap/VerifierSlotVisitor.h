@@ -87,8 +87,11 @@ public:
     bool isMarked(PreciseAllocation&, HeapCell*) const final;
 
     void markAuxiliary(const void*) final;
+    void markAuxiliaryWithoutOldGenerationAccounting(const void* base) final { markAuxiliary(base); }
 
     void reportExtraMemoryVisited(size_t) final { }
+    void reportChargedOldMemoryVisited(const void*, size_t) final { }
+    void reportChargedOldMutableMemoryVisited(const JSCell*, void (*)(const JSCell*, Heap&)) final { }
 #if ENABLE(RESOURCE_USAGE)
     void reportExternalMemoryVisited(size_t) final { }
 #endif

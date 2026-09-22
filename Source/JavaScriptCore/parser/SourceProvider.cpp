@@ -26,10 +26,16 @@
 #include "config.h"
 #include "SourceProvider.h"
 
+#include "AbstractSlotVisitor.h"
+#include "Heap.h"
+#include "VM.h"
+
+#include <wtf/CheckedArithmetic.h>
 #include <wtf/FileHandle.h>
 #include <wtf/FileSystem.h>
 #include <wtf/ProcessID.h>
 #include <wtf/text/MakeString.h>
+#include <limits>
 
 namespace JSC {
 
@@ -46,6 +52,99 @@ SourceProvider::SourceProvider(const SourceOrigin& sourceOrigin, String&& source
 }
 
 SourceProvider::~SourceProvider() = default;
+
+size_t SourceProvider::oldGenerationMemorySize() const
+{
+    String sourceURLDirective;
+    String sourceMappingURLDirective;
+    copySourceDirectivesForOldGenerationAccounting(sourceURLDirective, sourceMappingURLDirective);
+    CheckedSize result = 0;
+    auto add = [&] (const StringImpl* string) {
+        if (string)
+            result += string->oldGenerationCostDuringGC();
+    };
+    add(sourceStringImplForOldGenerationAccounting());
+    add(m_sourceOrigin.string().impl());
+    add(m_sourceURL.impl());
+    add(m_preRedirectURL.impl());
+    add(sourceURLDirective.impl());
+    add(sourceMappingURLDirective.impl());
+    return result.hasOverflowed() ? std::numeric_limits<size_t>::max() : result.value();
+}
+
+void SourceProvider::reportChargedOldMemory(AbstractSlotVisitor& visitor) const
+{
+    if (!visitor.heap()->hasOldGenerationLimit())
+        return;
+    visitor.heap()->rememberChargedOldSourceProvider(sourceIDForOldGenerationAccounting());
+    auto report = [&] (const StringImpl* string) {
+        if (!string)
+            return;
+        const StringImpl* owner = string->oldGenerationOwnerDuringGC();
+        if (owner)
+            visitor.reportChargedOldMemoryVisited(owner, owner->oldGenerationCostDuringGC());
+    };
+    report(sourceStringImplForOldGenerationAccounting());
+    report(m_sourceOrigin.string().impl());
+    report(m_sourceURL.impl());
+    report(m_preRedirectURL.impl());
+}
+
+void SourceProvider::reportChargedOldMutableMemory(Heap& heap) const
+{
+    // Mutable-owner callbacks invoke this after marking with mutators stopped.
+    String sourceURLDirective;
+    String sourceMappingURLDirective;
+    copySourceDirectivesForOldGenerationAccounting(sourceURLDirective, sourceMappingURLDirective);
+    heap.reportChargedOldStringVisited(sourceURLDirective.impl());
+    heap.reportChargedOldStringVisited(sourceMappingURLDirective.impl());
+}
+
+void SourceProvider::setSourceDirective(String& target, String&& directive)
+{
+    String oldDirective;
+    {
+        Locker locker { m_sourceDirectiveLock };
+        oldDirective = WTF::move(target);
+        target = WTF::move(directive);
+    }
+}
+
+void SourceProvider::setNewlyAllocatedDirective(VM& vm, String& target, String&& directive)
+{
+    size_t chargedMemory = 0;
+    if (vm.heap.hasOldGenerationLimit()) {
+        if (StringImpl* string = directive.impl()) {
+            if (string->oldGenerationOwnerDuringGC() == string)
+                chargedMemory = string->oldGenerationCostDuringGC();
+        }
+    }
+    setSourceDirective(target, WTF::move(directive));
+    vm.heap.noteChargedOldMemoryAllocated(chargedMemory);
+}
+
+void SourceProvider::setNewlyAllocatedSourceURLDirective(VM& vm, String&& directive)
+{
+    setNewlyAllocatedDirective(vm, m_sourceURLDirective, WTF::move(directive));
+}
+
+void SourceProvider::setNewlyAllocatedSourceMappingURLDirective(VM& vm, String&& directive)
+{
+    setNewlyAllocatedDirective(vm, m_sourceMappingURLDirective, WTF::move(directive));
+}
+
+void SourceProvider::copySourceDirectivesForOldGenerationAccounting(String& sourceURLDirective, String& sourceMappingURLDirective) const
+{
+    String sourceURLDirectiveCopy;
+    String sourceMappingURLDirectiveCopy;
+    {
+        Locker locker { m_sourceDirectiveLock };
+        sourceURLDirectiveCopy = m_sourceURLDirective;
+        sourceMappingURLDirectiveCopy = m_sourceMappingURLDirective;
+    }
+    sourceURLDirective = WTF::move(sourceURLDirectiveCopy);
+    sourceMappingURLDirective = WTF::move(sourceMappingURLDirectiveCopy);
+}
 
 void SourceProvider::lockUnderlyingBuffer()
 {
@@ -145,4 +244,3 @@ BaseWebAssemblySourceProvider::BaseWebAssemblySourceProvider(const SourceOrigin&
 #endif
 
 } // namespace JSC
-

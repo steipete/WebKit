@@ -38,10 +38,12 @@
 #include <wtf/OrderedHashMap.h>
 #include <wtf/OrderedHashSet.h>
 #include <wtf/RefPtr.h>
+#include <atomic>
 
 namespace JSC {
 
 class CyclicModuleRecord;
+class Heap;
 class JSModuleEnvironment;
 class JSModuleLoader;
 class JSModuleNamespaceObject;
@@ -164,12 +166,7 @@ public:
     void appendRequestedModule(const Identifier&, RefPtr<ScriptFetchParameters>&&, ModulePhase = ModulePhase::Evaluation);
 #if USE(BUN_JSC_ADDITIONS)
     // For records built from a serialized description whose sizes are known up front.
-    void reserveCapacity(unsigned requestedModules, unsigned importEntries, unsigned exportEntries)
-    {
-        m_requestedModules.reserveInitialCapacity(requestedModules);
-        m_importEntries.reserveInitialCapacity(importEntries);
-        m_exportEntries.reserveInitialCapacity(exportEntries);
-    }
+    void reserveCapacity(unsigned requestedModules, unsigned importEntries, unsigned exportEntries);
 #endif
     void addStarExportEntry(const Identifier&, ScriptFetchParameters::Type);
     void addImportEntry(const ImportEntry&);
@@ -343,6 +340,8 @@ protected:
 #endif
 
 private:
+    size_t chargedOldContainerMemorySize() const;
+    void updateChargedOldContainerMemory(Heap&);
     struct ResolveQuery;
     static Resolution resolveExportImpl(JSGlobalObject*, const ResolveQuery&);
     std::optional<Resolution> NODELETE tryGetCachedResolution(UniquedStringImpl* exportName);
@@ -409,6 +408,7 @@ protected:
 
     bool m_hasTLA { false };
     SourceProviderSourceType m_sourceType;
+    std::atomic<size_t> m_chargedOldContainerBytes { 0 };
 #if USE(BUN_JSC_ADDITIONS)
     bool m_prelinkedEntriesMaterialized { false };
     uint32_t m_prelinkedIndex { 0 };

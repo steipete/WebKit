@@ -106,6 +106,8 @@ void SlotVisitor::didStartMarking()
             break;
         case CollectionScope::Full:
             m_extraMemorySize = 0;
+            m_chargedOldBytesVisited = 0;
+            m_chargedOldExtraMemorySize = 0;
             break;
         }
     }
@@ -120,6 +122,8 @@ void SlotVisitor::reset()
 {
     AbstractSlotVisitor::reset();
     m_bytesVisited = 0;
+    m_chargedOldBytesVisited = 0;
+    m_chargedOldExtraMemorySize = 0;
     m_heapAnalyzer = nullptr;
     RELEASE_ASSERT(!m_currentCell);
 }
@@ -218,7 +222,8 @@ void SlotVisitor::appendJSCellOrAuxiliary(HeapCell* heapCell)
     }
         
     case HeapCell::Auxiliary: {
-        noteLiveAuxiliaryCell(heapCell);
+        bool chargeToOldGeneration = heapCell->subspace() != &heap()->primitiveGigacageAuxiliarySpace;
+        noteLiveAuxiliaryCell(heapCell, chargeToOldGeneration);
         return;
     } }
 }
@@ -290,23 +295,41 @@ ALWAYS_INLINE void SlotVisitor::appendToMarkStack(ContainerType& container, JSCe
     
     m_visitCount++;
     m_bytesVisited += container.cellSize();
+    if (heap()->hasOldGenerationLimit() && heap()->collectionScope() == CollectionScope::Full) {
+        CheckedSize chargedBytes = m_chargedOldBytesVisited;
+        chargedBytes += container.cellSize();
+        m_chargedOldBytesVisited = chargedBytes.hasOverflowed() ? std::numeric_limits<size_t>::max() : chargedBytes.value();
+    }
 
     m_collectorStack.append(cell);
 }
 
 void SlotVisitor::markAuxiliary(const void* base)
 {
+    markAuxiliaryImpl(base, true);
+}
+
+void SlotVisitor::markAuxiliaryWithoutOldGenerationAccounting(const void* base)
+{
+    markAuxiliaryImpl(base, false);
+}
+
+void SlotVisitor::markAuxiliaryImpl(const void* base, bool chargeToOldGeneration)
+{
     HeapCell* cell = std::bit_cast<HeapCell*>(base);
     
     ASSERT(cell->heap() == heap());
     
-    if (Heap::testAndSetMarked(m_markingVersion, cell))
+    if (Heap::testAndSetMarked(m_markingVersion, cell)) {
+        if (chargeToOldGeneration)
+            noteChargedOldAuxiliaryCell(cell);
         return;
+    }
     
-    noteLiveAuxiliaryCell(cell);
+    noteLiveAuxiliaryCell(cell, chargeToOldGeneration);
 }
 
-void SlotVisitor::noteLiveAuxiliaryCell(HeapCell* cell)
+void SlotVisitor::noteLiveAuxiliaryCell(HeapCell* cell, bool chargeToOldGeneration)
 {
     // We get here once per GC under these circumstances:
     //
@@ -324,6 +347,20 @@ void SlotVisitor::noteLiveAuxiliaryCell(HeapCell* cell)
     size_t cellSize = container.cellSize();
     m_bytesVisited += cellSize;
     m_nonCellVisitCount += cellSize;
+    if (chargeToOldGeneration)
+        noteChargedOldAuxiliaryCell(cell);
+}
+
+void SlotVisitor::noteChargedOldAuxiliaryCell(HeapCell* cell)
+{
+    if (!heap()->hasOldGenerationLimit()
+        || heap()->collectionScope() != CollectionScope::Full
+        || !heap()->addChargedOldMemoryOwner(cell))
+        return;
+    size_t cellSize = cell->cellContainer().cellSize();
+    CheckedSize chargedBytes = m_chargedOldBytesVisited;
+    chargedBytes += cellSize;
+    m_chargedOldBytesVisited = chargedBytes.hasOverflowed() ? std::numeric_limits<size_t>::max() : chargedBytes.value();
 }
 
 class SetCurrentCellScope {
@@ -418,6 +455,11 @@ inline void SlotVisitor::propagateExternalMemoryVisitedIfNecessary()
         else if (m_extraMemorySize)
             heap()->reportExtraMemoryVisited(m_extraMemorySize);
         m_extraMemorySize = 0;
+        if (m_chargedOldExtraMemorySize.hasOverflowed())
+            heap()->reportChargedOldMemoryVisited(std::numeric_limits<size_t>::max());
+        else if (m_chargedOldExtraMemorySize)
+            heap()->reportChargedOldMemoryVisited(m_chargedOldExtraMemorySize);
+        m_chargedOldExtraMemorySize = 0;
     }
 }
 

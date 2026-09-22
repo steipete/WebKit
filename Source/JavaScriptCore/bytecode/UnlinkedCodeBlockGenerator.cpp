@@ -61,6 +61,7 @@ bool UnlinkedCodeBlockGenerator::finalize(std::unique_ptr<JSInstructionStream> i
 {
     ASSERT(instructions);
     bool metadataOK = true;
+    size_t chargedMemory = 0;
     {
         Locker locker { m_codeBlock->cellLock() };
         m_codeBlock->m_instructions = WTF::move(instructions);
@@ -98,9 +99,13 @@ bool UnlinkedCodeBlockGenerator::finalize(std::unique_ptr<JSInstructionStream> i
 
         if (Options::returnEarlyFromInfiniteLoopsForFuzzing()) [[unlikely]]
             m_codeBlock->initializeLoopHintExecutionCounter();
+        if (m_vm.heap.hasOldGenerationLimit())
+            chargedMemory = m_codeBlock->chargedOldMemorySize(locker);
     }
     m_vm.writeBarrier(m_codeBlock.get());
-    m_vm.heap.reportExtraMemoryAllocated(m_codeBlock.get(), m_codeBlock->m_instructions->sizeInBytes() + m_codeBlock->metadataSizeInBytes());
+    size_t generatedMemory = m_codeBlock->m_instructions->sizeInBytes() + m_codeBlock->metadataSizeInBytes();
+    m_vm.heap.noteChargedOldMemoryAllocated(chargedMemory);
+    m_vm.heap.reportExtraMemoryAllocated(m_codeBlock.get(), generatedMemory);
     return metadataOK;
 }
 

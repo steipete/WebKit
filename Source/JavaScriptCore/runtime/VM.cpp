@@ -252,7 +252,7 @@ void VM::computeCanUseJIT()
 
 static bool vmCreationShouldCrash = false;
 
-VM::VM(VMType vmType, HeapType heapType, WTF::RunLoop* runLoop, bool* success)
+VM::VM(VMType vmType, HeapType heapType, WTF::RunLoop* runLoop, bool* success, HeapConfiguration heapConfiguration)
     : topCallFrame(CallFrame::noCaller())
     , m_identifier(VMIdentifier::generate())
     , m_apiLock(adoptRef(*new JSLock(this)))
@@ -260,7 +260,7 @@ VM::VM(VMType vmType, HeapType heapType, WTF::RunLoop* runLoop, bool* success)
     , m_random(Options::seedOfVMRandomForFuzzer() ? Options::seedOfVMRandomForFuzzer() : cryptographicallyRandomNumber<uint32_t>())
     , m_heapRandom(Options::seedOfVMRandomForFuzzer() ? Options::seedOfVMRandomForFuzzer() : cryptographicallyRandomNumber<uint32_t>())
     , m_integrityRandom(*this)
-    , heap(*this, heapType)
+    , heap(*this, heapType, heapConfiguration)
     , clientHeap(heap)
     , vmType(vmType)
     , deferredWorkTimer(DeferredWorkTimer::create(*this))
@@ -766,10 +766,13 @@ Ref<VM> VM::create(HeapType heapType, WTF::RunLoop* runLoop)
     return adoptRef(*new VM(VMType::Default, heapType, runLoop));
 }
 
-RefPtr<VM> VM::tryCreate(HeapType heapType, WTF::RunLoop* runLoop)
+RefPtr<VM> VM::tryCreate(HeapType heapType, WTF::RunLoop* runLoop, HeapConfiguration heapConfiguration)
 {
+    if (heapConfiguration.maxOldGenerationSize && !Options::useGC()) [[unlikely]]
+        return nullptr;
+
     bool success = true;
-    RefPtr<VM> vm = adoptRef(new VM(VMType::Default, heapType, runLoop, &success));
+    RefPtr<VM> vm = adoptRef(new VM(VMType::Default, heapType, runLoop, &success, heapConfiguration));
     if (!success) {
         // Here, we're destructing a partially constructed VM and we know that
         // no one else can be using it at the same time. So, acquiring the lock

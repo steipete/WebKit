@@ -397,6 +397,7 @@ private:
 
     BytecodeLivenessAnalysis& livenessAnalysisSlow(CodeBlock*);
     ExpressionInfo& expressionInfoSlow();
+    size_t chargedOldMemorySize(const AbstractLocker&);
 
     VirtualRegister m_thisRegister;
     VirtualRegister m_scopeRegister;

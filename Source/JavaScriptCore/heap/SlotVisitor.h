@@ -130,6 +130,7 @@ public:
     void clearMarkStacks();
 
     size_t bytesVisited() const { return m_bytesVisited; }
+    size_t chargedOldBytesVisited() const { return m_chargedOldBytesVisited; }
 
     void donate();
     void drain(MonotonicTime timeout = MonotonicTime::infinity());
@@ -151,8 +152,11 @@ public:
     // This informs the GC about auxiliary of some size that we are keeping alive. If you don't do
     // this then the space will be freed at end of GC.
     void markAuxiliary(const void* base) final;
+    void markAuxiliaryWithoutOldGenerationAccounting(const void* base) final;
 
     void reportExtraMemoryVisited(size_t) final;
+    void reportChargedOldMemoryVisited(const void* owner, size_t) final;
+    void reportChargedOldMutableMemoryVisited(const JSCell*, void (*)(const JSCell*, Heap&)) final;
 #if ENABLE(RESOURCE_USAGE)
     void reportExternalMemoryVisited(size_t) final;
 #endif
@@ -203,7 +207,9 @@ private:
     template<typename ContainerType>
     void appendToMarkStack(ContainerType&, JSCell*);
     
-    void noteLiveAuxiliaryCell(HeapCell*);
+    void markAuxiliaryImpl(const void*, bool chargeToOldGeneration);
+    void noteLiveAuxiliaryCell(HeapCell*, bool chargeToOldGeneration);
+    void noteChargedOldAuxiliaryCell(HeapCell*);
     
     void visitChildren(const JSCell*);
 
@@ -225,8 +231,10 @@ private:
     HeapVersion m_markingVersion;
 
     size_t m_bytesVisited { 0 };
+    size_t m_chargedOldBytesVisited { 0 };
     size_t m_nonCellVisitCount { 0 }; // Used for incremental draining, ignored otherwise.
     CheckedSize m_extraMemorySize { 0 };
+    CheckedSize m_chargedOldExtraMemorySize { 0 };
 
     HeapAnalyzer* m_heapAnalyzer { nullptr };
     JSCell* m_currentCell { nullptr };

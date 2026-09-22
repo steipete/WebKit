@@ -59,6 +59,7 @@ void JSWebAssemblyException::finishCreation(VM& vm)
 {
     Base::finishCreation(vm);
     ASSERT(inherits(info()));
+    vm.heap.noteChargedOldMemoryAllocated(payload().byteSize());
     vm.heap.reportExtraMemoryAllocated(this, payload().byteSize());
 }
 
@@ -76,6 +77,8 @@ void JSWebAssemblyException::visitChildrenImpl(JSCell* cell, Visitor& visitor)
         offset += tagType.argumentType(i).kind() == Wasm::TypeKind::V128 ? 2 : 1;
     }
     visitor.reportExtraMemoryVisited(exception->payload().size());
+    if (visitor.heap()->hasOldGenerationLimit())
+        visitor.reportChargedOldMemoryVisited(exception, exception->payload().byteSize());
 }
 
 DEFINE_VISIT_CHILDREN(JSWebAssemblyException);

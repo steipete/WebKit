@@ -67,6 +67,11 @@ void Exception::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     for (StackFrame& frame : thisObject->m_stack)
         frame.visitAggregate(visitor);
     visitor.reportExtraMemoryVisited(thisObject->m_stack.sizeInBytes());
+    if (visitor.heap()->hasOldGenerationLimit())
+        visitor.reportChargedOldMutableMemoryVisited(thisObject, [] (const JSCell* cell, Heap& heap) {
+            auto* exception = static_cast<const Exception*>(cell);
+            heap.reportChargedOldMemoryVisited(exception->m_stack.sizeInBytes());
+        });
 }
 
 size_t Exception::estimatedSize(JSCell* cell, VM& vm)
@@ -94,6 +99,7 @@ void Exception::finishCreation(VM& vm, StackCaptureAction action)
         vm.interpreter.getStackTrace(this, stackTrace, 0, Options::exceptionStackTraceLimit());
 
     m_stack = WTF::move(stackTrace);
+    vm.heap.noteChargedOldMemoryAllocated(m_stack.sizeInBytes());
     vm.heap.reportExtraMemoryAllocated(this, m_stack.sizeInBytes());
 }
 

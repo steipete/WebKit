@@ -25,6 +25,7 @@
 
 #include "config.h"
 
+#include "AbstractSlotVisitor.h"
 #include "CodeBlock.h"
 #include "CompilationResult.h"
 #include "Debugger.h"
@@ -42,6 +43,7 @@
 #include "ModuleProgramCodeBlock.h"
 #include "ParserError.h"
 #include "ProgramCodeBlock.h"
+#include "SourceProvider.h"
 #include "VMInlines.h"
 
 namespace JSC {
@@ -65,6 +67,22 @@ ScriptExecutable::ScriptExecutable(Structure* structure, VM& vm, const SourceCod
     , m_derivedContextType(static_cast<unsigned>(derivedContextType))
     , m_evalContextType(static_cast<unsigned>(evalContextType))
 {
+    if (vm.heap.hasOldGenerationLimit()) {
+        if (SourceProvider* provider = m_source.provider())
+            vm.heap.noteChargedOldMemoryAllocatedOnce(provider->asID(), provider->oldGenerationMemorySize());
+    }
+}
+
+void ScriptExecutable::reportChargedOldMemory(AbstractSlotVisitor& visitor) const
+{
+    if (SourceProvider* provider = m_source.provider()) {
+        provider->reportChargedOldMemory(visitor);
+        visitor.reportChargedOldMutableMemoryVisited(this, [] (const JSCell* cell, Heap& heap) {
+            auto* executable = static_cast<const ScriptExecutable*>(cell);
+            if (SourceProvider* provider = executable->source().provider())
+                provider->reportChargedOldMutableMemory(heap);
+        });
+    }
 }
 
 void ScriptExecutable::destroy(JSCell* cell)

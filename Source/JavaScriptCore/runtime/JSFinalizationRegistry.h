@@ -102,6 +102,7 @@ private:
     }
 
     JS_EXPORT_PRIVATE void finishCreation(VM&, JSGlobalObject*, JSObject* callback);
+    size_t chargedOldMemorySize() const;
 
     struct Registration {
         JSCell* target;
@@ -122,5 +123,3 @@ private:
 };
 
 } // namespace JSC
-
-

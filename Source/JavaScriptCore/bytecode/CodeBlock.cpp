@@ -63,6 +63,7 @@
 #include "JITWorklist.h"
 #include "JSCInlines.h"
 #include "JSCJSValue.h"
+#include <limits>
 #include "JSLexicalEnvironment.h"
 #include "JSModuleEnvironment.h"
 #include "JSSet.h"
@@ -362,6 +363,19 @@ void CodeBlock::finishCreation(VM& vm, CopyParsedBlockTag, CodeBlock& other)
     }
 }
 
+static RefPtr<MetadataTable> linkMetadataAndNoteChargedOldMemory(VM& vm, UnlinkedCodeBlock& unlinkedCodeBlock)
+{
+    if (!vm.heap.hasOldGenerationLimit())
+        return unlinkedCodeBlock.metadata().link();
+
+    size_t oldSize = unlinkedCodeBlock.metadataSizeInBytes();
+    RefPtr<MetadataTable> metadata = unlinkedCodeBlock.metadata().link();
+    size_t newSize = unlinkedCodeBlock.metadataSizeInBytes();
+    if (newSize > oldSize)
+        vm.heap.noteChargedOldMemoryAllocated(newSize - oldSize);
+    return metadata;
+}
+
 CodeBlock::CodeBlock(VM& vm, Structure* structure, ScriptExecutable* ownerExecutable, UnlinkedCodeBlock* unlinkedCodeBlock, JSScope* scope)
     : JSCell(vm, structure)
     , m_globalObject(scope->realm(), WriteBarrierEarlyInit)
@@ -383,7 +397,7 @@ CodeBlock::CodeBlock(VM& vm, Structure* structure, ScriptExecutable* ownerExecut
     , m_ownerExecutable(ownerExecutable, WriteBarrierEarlyInit)
     , m_vm(&vm)
     , m_instructionsRawPointer(unlinkedCodeBlock->instructions().rawPointer())
-    , m_metadata(unlinkedCodeBlock->metadata().link())
+    , m_metadata(linkMetadataAndNoteChargedOldMemory(vm, *unlinkedCodeBlock))
     , m_creationTime(ApproximateTime::now())
 #if ASSERT_ENABLED
     , m_magic(CODEBLOCK_MAGIC)
@@ -827,8 +841,10 @@ bool CodeBlock::finishCreation(VM& vm, ScriptExecutable* ownerExecutable, Unlink
     if (Options::dumpGeneratedBytecodes())
         dumpBytecode();
 
-    if (m_metadata)
+    if (m_metadata) {
+        vm.heap.noteChargedOldMemoryAllocated(m_metadata->sizeInBytesForGC());
         vm.heap.reportExtraMemoryAllocated(this, m_metadata->sizeInBytesForGC());
+    }
 
     initializeTemplateObjects(topLevelExecutable, templateObjectIndices);
     RETURN_IF_EXCEPTION(throwScope, false);
@@ -1351,6 +1367,15 @@ void CodeBlock::visitChildren(Visitor& visitor)
         if (m_jitCode && !m_jitCode->isShared())
             extraMemory += m_jitCode->size();
         visitor.reportExtraMemoryVisited(extraMemory);
+        if (visitor.heap()->hasOldGenerationLimit())
+            visitor.reportChargedOldMutableMemoryVisited(this, [] (const JSCell* cell, Heap& heap) {
+                auto* codeBlock = static_cast<const CodeBlock*>(cell);
+                ConcurrentJSLocker locker(codeBlock->m_lock);
+                if (codeBlock->m_metadata)
+                    heap.reportChargedOldMemoryVisited(codeBlock->m_metadata.get(), codeBlock->m_metadata->sizeInBytesForGC());
+                if (codeBlock->m_jitCode && !codeBlock->m_jitCode->isShared())
+                    heap.reportChargedOldMemoryVisited(codeBlock->m_jitCode->size());
+            });
 
         stronglyVisitStrongReferences(locker, visitor);
         stronglyVisitWeakReferences(locker, visitor);

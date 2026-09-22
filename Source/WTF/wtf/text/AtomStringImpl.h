@@ -37,10 +37,14 @@ public:
 
     WTF_EXPORT_PRIVATE static RefPtr<AtomStringImpl> add(std::span<const Latin1Character>);
     WTF_EXPORT_PRIVATE static RefPtr<AtomStringImpl> add(std::span<const char16_t>);
+    WTF_EXPORT_PRIVATE static RefPtr<AtomStringImpl> add(std::span<const Latin1Character>, size_t* newlyAllocatedOwnedBackingCost);
+    WTF_EXPORT_PRIVATE static RefPtr<AtomStringImpl> add(std::span<const char16_t>, size_t* newlyAllocatedOwnedBackingCost);
     ALWAYS_INLINE static RefPtr<AtomStringImpl> add(std::span<const char> characters);
 
     WTF_EXPORT_PRIVATE static RefPtr<AtomStringImpl> add(HashTranslatorCharBuffer<Latin1Character>&);
     WTF_EXPORT_PRIVATE static RefPtr<AtomStringImpl> add(HashTranslatorCharBuffer<char16_t>&);
+    WTF_EXPORT_PRIVATE static RefPtr<AtomStringImpl> add(HashTranslatorCharBuffer<Latin1Character>&, size_t* newlyAllocatedOwnedBackingCost);
+    WTF_EXPORT_PRIVATE static RefPtr<AtomStringImpl> add(HashTranslatorCharBuffer<char16_t>&, size_t* newlyAllocatedOwnedBackingCost);
 #if USE(BUN_JSC_ADDITIONS)
     // Like add(HashTranslatorCharBuffer&), but a new atom aliases the (immortal) characters instead of copying them.
     WTF_EXPORT_PRIVATE static Ref<AtomStringImpl> addWithoutCopying(HashTranslatorCharBuffer<Latin1Character>&);
@@ -76,6 +80,8 @@ public:
 
     template<typename StringTableProvider>
     ALWAYS_INLINE static RefPtr<AtomStringImpl> addWithStringTableProvider(StringTableProvider&, StringImpl*);
+    template<typename StringTableProvider>
+    ALWAYS_INLINE static RefPtr<AtomStringImpl> addWithStringTableProvider(StringTableProvider&, StringImpl*, size_t* newlyAllocatedOwnedBackingCost);
 
 #if ASSERT_ENABLED
     WTF_EXPORT_PRIVATE static bool isInAtomStringTable(StringImpl*);
@@ -90,10 +96,12 @@ private:
     WTF_EXPORT_PRIVATE static Ref<AtomStringImpl> addLiteral(std::span<const Latin1Character>);
 
     ALWAYS_INLINE static Ref<AtomStringImpl> add(AtomStringTable&, StringImpl&);
+    ALWAYS_INLINE static Ref<AtomStringImpl> add(AtomStringTable&, StringImpl&, size_t* newlyAllocatedOwnedBackingCost);
 
     WTF_EXPORT_PRIVATE static Ref<AtomStringImpl> addSlowCase(StringImpl&);
     WTF_EXPORT_PRIVATE static Ref<AtomStringImpl> addSlowCase(Ref<StringImpl>&&);
     WTF_EXPORT_PRIVATE static Ref<AtomStringImpl> addSlowCase(AtomStringTable&, StringImpl&);
+    WTF_EXPORT_PRIVATE static Ref<AtomStringImpl> addSlowCase(AtomStringTable&, StringImpl&, size_t* newlyAllocatedOwnedBackingCost);
 
     WTF_EXPORT_PRIVATE static RefPtr<AtomStringImpl> lookUpSlowCase(StringImpl&);
 };
@@ -137,6 +145,16 @@ ALWAYS_INLINE RefPtr<AtomStringImpl> AtomStringImpl::addWithStringTableProvider(
     if (!string)
         return nullptr;
     return add(*stringTableProvider.atomStringTable(), *string);
+}
+
+template<typename StringTableProvider>
+ALWAYS_INLINE RefPtr<AtomStringImpl> AtomStringImpl::addWithStringTableProvider(StringTableProvider& stringTableProvider, StringImpl* string, size_t* newlyAllocatedOwnedBackingCost)
+{
+    if (newlyAllocatedOwnedBackingCost)
+        *newlyAllocatedOwnedBackingCost = 0;
+    if (!string)
+        return nullptr;
+    return add(*stringTableProvider.atomStringTable(), *string, newlyAllocatedOwnedBackingCost);
 }
 
 ALWAYS_INLINE Ref<AtomStringImpl> AtomStringImpl::add(StringImpl& string)
@@ -188,6 +206,25 @@ ALWAYS_INLINE Ref<AtomStringImpl> AtomStringImpl::add(AtomStringTable& stringTab
     }
 #endif
     return addSlowCase(stringTable, string);
+}
+
+ALWAYS_INLINE Ref<AtomStringImpl> AtomStringImpl::add(AtomStringTable& stringTable, StringImpl& string, size_t* newlyAllocatedOwnedBackingCost)
+{
+    if (newlyAllocatedOwnedBackingCost)
+        *newlyAllocatedOwnedBackingCost = 0;
+    if (auto* atom = dynamicDowncast<AtomStringImpl>(string)) {
+        ASSERT_WITH_MESSAGE(!string.length() || isInAtomStringTable(&string), "The atom string comes from an other thread!");
+        return *atom;
+    }
+#if USE(BUN_JSC_ADDITIONS)
+    // TODO: remove once atomic strings are process-wide.
+    if (!string.canBecomeAtom()) [[unlikely]] {
+        if (string.is8Bit())
+            return *add(string.span8(), newlyAllocatedOwnedBackingCost);
+        return *add(string.span16(), newlyAllocatedOwnedBackingCost);
+    }
+#endif
+    return addSlowCase(stringTable, string, newlyAllocatedOwnedBackingCost);
 }
 
 #if ASSERT_ENABLED

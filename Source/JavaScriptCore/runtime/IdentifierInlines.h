@@ -106,7 +106,13 @@ Ref<AtomStringImpl> Identifier::add(VM& vm, std::span<const T> string)
     if (string.empty())
         return *static_cast<AtomStringImpl*>(StringImpl::empty());
 
-    return *AtomStringImpl::add(string);
+    if (!vm.heap.hasOldGenerationLimit())
+        return *AtomStringImpl::add(string);
+
+    size_t newlyAllocatedOwnedBackingCost = 0;
+    Ref atom = AtomStringImpl::add(string, &newlyAllocatedOwnedBackingCost).releaseNonNull();
+    vm.heap.noteChargedOldMemoryAllocated(newlyAllocatedOwnedBackingCost);
+    return atom;
 }
 
 inline Ref<AtomStringImpl> Identifier::add(VM& vm, StringImpl* r)
@@ -114,7 +120,13 @@ inline Ref<AtomStringImpl> Identifier::add(VM& vm, StringImpl* r)
 #ifndef NDEBUG
     checkCurrentAtomStringTable(vm);
 #endif
-    return *AtomStringImpl::addWithStringTableProvider(vm, r);
+    if (!vm.heap.hasOldGenerationLimit())
+        return *AtomStringImpl::addWithStringTableProvider(vm, r);
+
+    size_t newlyAllocatedOwnedBackingCost = 0;
+    Ref atom = AtomStringImpl::addWithStringTableProvider(vm, r, &newlyAllocatedOwnedBackingCost).releaseNonNull();
+    vm.heap.noteChargedOldMemoryAllocated(newlyAllocatedOwnedBackingCost);
+    return atom;
 }
 
 inline Identifier Identifier::createLatin1(VM& vm, std::span<const char16_t> string)

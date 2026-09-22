@@ -145,6 +145,8 @@ void DirectArguments::overrideThings(JSGlobalObject* globalObject)
     m_mappedArguments.set(vm, this, overrides);
     for (unsigned i = internalLength(); i--;)
         overrides[i] = false;
+    if (vm.heap.hasOldGenerationLimit())
+        vm.heap.noteChargedOldMemoryAllocated(mappedArgumentsSize());
 }
 
 void DirectArguments::overrideThingsIfNecessary(JSGlobalObject* globalObject)

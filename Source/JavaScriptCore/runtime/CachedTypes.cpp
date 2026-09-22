@@ -182,13 +182,21 @@ Ref<AtomStringImpl> Decoder::atomForInlineString(VM& vm, std::span<const uint8_t
     unsigned length = characters.size();
     if (length == 1)
         return vm.smallStrings.singleCharacterStringRep(characters[0]);
+    size_t chargedMemory = 0;
+    auto add = [&] {
+        if (vm.heap.hasOldGenerationLimit())
+            return AtomStringImpl::add(characters, &chargedMemory);
+        return AtomStringImpl::add(characters);
+    };
     if (length == 2) {
         AtomStringImpl*& entry = vm.ensureCachedBytecodeTwoCharacterAtoms()[characters[0] | characters[1] << 8];
         if (entry) [[likely]]
             return *entry;
-        Ref<AtomStringImpl> atom = AtomStringImpl::add(characters).releaseNonNull();
+        Ref<AtomStringImpl> atom = add().releaseNonNull();
         atom->ref();
         entry = atom.ptr();
+        if (chargedMemory)
+            vm.heap.noteChargedOldMemoryAllocated(chargedMemory);
         return atom;
     }
 #if USE(BUN_JSC_ADDITIONS)
@@ -200,14 +208,19 @@ Ref<AtomStringImpl> Decoder::atomForInlineString(VM& vm, std::span<const uint8_t
             if (cached[0] == characters[0] && cached[1] == characters[1] && cached[2] == characters[2]) [[likely]]
                 return *entry;
         }
-        Ref<AtomStringImpl> atom = AtomStringImpl::add(characters).releaseNonNull();
+        Ref<AtomStringImpl> atom = add().releaseNonNull();
         atom->ref();
         if (AtomStringImpl* evicted = std::exchange(entry, atom.ptr()))
             evicted->deref();
+        if (chargedMemory)
+            vm.heap.noteChargedOldMemoryAllocated(chargedMemory);
         return atom;
     }
 #endif
-    return AtomStringImpl::add(characters).releaseNonNull();
+    Ref<AtomStringImpl> atom = add().releaseNonNull();
+    if (chargedMemory)
+        vm.heap.noteChargedOldMemoryAllocated(chargedMemory);
+    return atom;
 }
 
 String Decoder::stringForInlineString(std::span<const uint8_t, 4> slot)
@@ -362,11 +375,16 @@ DecoderStringTable::Record DecoderStringTable::record(uint32_t ordinal) const
 }
 
 template<typename CharacterType>
-static Ref<AtomStringImpl> atomize(std::span<const CharacterType> characters, uint32_t hash)
+static Ref<AtomStringImpl> atomize(std::span<const CharacterType> characters, uint32_t hash, size_t* newlyAllocatedOwnedBackingCost)
 {
+    if (newlyAllocatedOwnedBackingCost)
+        *newlyAllocatedOwnedBackingCost = 0;
 #if USE(BUN_JSC_ADDITIONS)
     if (!AtomStringImpl::isValidPrecomputedHash(hash)) [[unlikely]] // an edited executable; never let it pick the bucket
-        return AtomStringImpl::add(characters).releaseNonNull();
+        return (newlyAllocatedOwnedBackingCost
+                ? AtomStringImpl::add(characters, newlyAllocatedOwnedBackingCost)
+                : AtomStringImpl::add(characters))
+            .releaseNonNull();
 #endif
     // Same threshold as CachedUniquedStringImplBase::minimumLengthToAliasPayload: long strings alias the (persistent) blob.
     WTF::HashTranslatorCharBuffer<CharacterType> hashed { characters, hash };
@@ -377,7 +395,10 @@ static Ref<AtomStringImpl> atomize(std::span<const CharacterType> characters, ui
 #endif
         return AtomStringImpl::add(RefPtr<StringImpl> { StringImpl::createWithoutCopying(characters) }).releaseNonNull();
     }
-    return AtomStringImpl::add(hashed).releaseNonNull();
+    return (newlyAllocatedOwnedBackingCost
+            ? AtomStringImpl::add(hashed, newlyAllocatedOwnedBackingCost)
+            : AtomStringImpl::add(hashed))
+        .releaseNonNull();
 }
 
 const DecoderStringTable* Decoder::stringsToPrefetch()
@@ -515,11 +536,15 @@ Ref<AtomStringImpl> DecoderStringTable::atomFor(VM& vm, uint32_t ordinal)
     }
     m_atomsCreated++;
     Record r = record(ordinal);
+    size_t chargedMemory = 0;
+    size_t* chargedMemoryOutput = vm.heap.hasOldGenerationLimit() ? &chargedMemory : nullptr;
     Ref<AtomStringImpl> atom = r.is8Bit
-        ? atomize(std::span { std::bit_cast<const Latin1Character*>(r.characters), r.length }, r.hash)
-        : atomize(std::span { std::bit_cast<const char16_t*>(r.characters), r.length }, r.hash);
+        ? atomize(std::span { std::bit_cast<const Latin1Character*>(r.characters), r.length }, r.hash, chargedMemoryOutput)
+        : atomize(std::span { std::bit_cast<const char16_t*>(r.characters), r.length }, r.hash, chargedMemoryOutput);
     atom->ref();
     slot = std::bit_cast<uintptr_t>(static_cast<StringImpl*>(atom.ptr()));
+    if (chargedMemory)
+        vm.heap.noteChargedOldMemoryAllocated(chargedMemory);
     return atom;
 }
 
@@ -607,6 +632,7 @@ JSString* DecoderStringTable::jsStringFor(VM& vm, uint32_t ordinal)
     if (isCell(slot))
         return cell(slot);
     RefPtr<StringImpl> value;
+    size_t chargedMemory = 0;
     if (!slot) {
         Record r = record(ordinal);
         if (r.length == 1) {
@@ -615,13 +641,23 @@ JSString* DecoderStringTable::jsStringFor(VM& vm, uint32_t ordinal)
                 return vm.smallStrings.singleCharacterString(c); // already shared VM-wide; leave the slot empty
         }
         value = createImpl(r);
+        if (vm.heap.hasOldGenerationLimit()) {
+            if (StringImpl* string = value.get()) {
+                if (string->oldGenerationOwnerDuringGC() == string)
+                    chargedMemory = string->oldGenerationCostDuringGC();
+            }
+        }
     } else
         value = adoptRef(*impl(slot)); // the cell takes over the table's reference
     // The impl's bytes belong to the table (or the executable), not the GC heap.
     JSString* string = JSString::createHasOtherOwner(vm, value.releaseNonNull());
     slot = std::bit_cast<uintptr_t>(string) | cellTag;
-    Locker locker { m_cellsLock };
-    m_cellOrdinals.append(ordinal);
+    {
+        Locker locker { m_cellsLock };
+        m_cellOrdinals.append(ordinal);
+    }
+    if (chargedMemory)
+        vm.heap.noteChargedOldMemoryAllocated(chargedMemory);
     return string;
 }
 
@@ -1935,6 +1971,7 @@ public:
         auto create = [&](auto buffer) -> UniquedStringImpl* {
             if (!m_isSymbol) {
                 RefPtr<AtomStringImpl> atom;
+                size_t chargedMemory = 0;
                 // Long strings out of a persistent payload keep their characters in the mapping (clean, shared pages) and
                 // only allocate the StringImpl header (with useFastCachedAtoms, only once the stored-hash probe found no atom).
                 WTF::HashTranslatorCharBuffer<std::remove_const_t<typename decltype(buffer)::element_type>> hashed { buffer, m_hash };
@@ -1945,10 +1982,15 @@ public:
                     else
 #endif
                         atom = AtomStringImpl::add(RefPtr<StringImpl> { StringImpl::createWithoutCopying(buffer) });
-                } else
-                    atom = AtomStringImpl::add(hashed);
+                } else {
+                    atom = decoder.vm().heap.hasOldGenerationLimit()
+                        ? AtomStringImpl::add(hashed, &chargedMemory)
+                        : AtomStringImpl::add(hashed);
+                }
                 if (m_ordinal != noOrdinal)
                     decoder.setAtomForOrdinal(m_ordinal, *atom);
+                if (chargedMemory)
+                    decoder.vm().heap.noteChargedOldMemoryAllocated(chargedMemory);
                 return static_cast<UniquedStringImpl*>(static_cast<StringImpl*>(atom.leakRef()));
             }
 
@@ -1956,10 +1998,26 @@ public:
             VM& vm = decoder.vm();
             if (m_isRegistered) {
                 String str(buffer);
-                if (m_isPrivate)
-                    symbol = static_cast<SymbolImpl*>(&protect(vm.privateSymbolRegistry())->symbolForKey(str).leakRef());
-                else
-                    symbol = static_cast<SymbolImpl*>(&protect(vm.symbolRegistry())->symbolForKey(str).leakRef());
+                bool isNewSymbol = false;
+                Ref<RegisteredSymbolImpl> registeredSymbol = [&] {
+                    if (m_isPrivate) {
+                        auto registry = protect(vm.privateSymbolRegistry());
+                        return vm.heap.hasOldGenerationLimit()
+                            ? registry->symbolForKey(str, &isNewSymbol)
+                            : registry->symbolForKey(str);
+                    }
+                    auto registry = protect(vm.symbolRegistry());
+                    return vm.heap.hasOldGenerationLimit()
+                        ? registry->symbolForKey(str, &isNewSymbol)
+                        : registry->symbolForKey(str);
+                }();
+                symbol = static_cast<SymbolImpl*>(&registeredSymbol.leakRef());
+                if (isNewSymbol) {
+                    if (StringImpl* string = str.impl()) {
+                        if (string->oldGenerationOwnerDuringGC() == string)
+                            vm.heap.noteChargedOldMemoryAllocated(string->oldGenerationCostDuringGC());
+                    }
+                }
             } else {
                 if (m_isWellKnownSymbol)
                     symbol = vm.propertyNames->builtinNames().lookUpWellKnownSymbol(buffer);
@@ -4200,6 +4258,14 @@ ALWAYS_INLINE void CachedCodeBlock<CodeBlockType>::decode(Decoder& decoder, Unli
     decodeArrayFromTail<CachedIdentifier>(decoder, strings ? HeadPrefetch::All : HeadPrefetch::None, at<CachedIdentifier>(layout, layout.identifiers), layout.identifiers.count, codeBlock.m_identifiers);
     decodeArrayFromTail<CachedWriteBarrier<CachedFunctionExecutable>>(decoder, at<CachedWriteBarrier<CachedFunctionExecutable>>(layout, layout.functionDecls), layout.functionDecls.count, codeBlock.m_functionDecls, &codeBlock);
     decodeArrayFromTail<CachedWriteBarrier<CachedFunctionExecutable>>(decoder, at<CachedWriteBarrier<CachedFunctionExecutable>>(layout, layout.functionExprs), layout.functionExprs.count, codeBlock.m_functionExprs, &codeBlock);
+    if (decoder.vm().heap.hasOldGenerationLimit()) {
+        size_t chargedMemory;
+        {
+            Locker locker { codeBlock.cellLock() };
+            chargedMemory = codeBlock.chargedOldMemorySize(locker);
+        }
+        decoder.vm().heap.noteChargedOldMemoryAllocated(chargedMemory);
+    }
 }
 
 UnlinkedProgramCodeBlock* CachedProgramCodeBlock::decode(Decoder& decoder) const

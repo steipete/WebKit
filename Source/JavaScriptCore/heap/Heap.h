@@ -60,6 +60,7 @@
 #include <wtf/ParallelHelperPool.h>
 #include <wtf/SegmentedVector.h>
 #include <wtf/Threading.h>
+#include <atomic>
 
 #if USE(BUN_JSC_ADDITIONS)
 #include "WeakSet.h"
@@ -334,6 +335,10 @@ typedef HashCountedSet<ASCIILiteral> TypeCountSet;
 
 enum class HeapType : uint8_t { Small, Medium, Large };
 
+struct HeapConfiguration {
+    size_t maxOldGenerationSize { 0 };
+};
+
 class HeapUtil;
 
 class Heap {
@@ -358,7 +363,7 @@ public:
     // Take this if you know that from->cellState() < barrierThreshold.
     JS_EXPORT_PRIVATE void writeBarrierSlowPath(const JSCell* from);
 
-    Heap(VM&, HeapType);
+    Heap(VM&, HeapType, HeapConfiguration = { });
     ~Heap();
     void lastChanceToFinalize();
     void releaseDelayedReleasedObjects();
@@ -384,6 +389,11 @@ public:
 
     void addObserver(HeapObserver* observer) { m_observers.append(observer); }
     void removeObserver(HeapObserver* observer) { m_observers.removeFirst(observer); }
+
+    size_t maxOldGenerationSize() const { return m_maxOldGenerationSize; }
+    size_t chargedOldBytesAfterLastFullCollection() const { return m_chargedOldBytesAfterLastFullCollect.load(std::memory_order_acquire); }
+    JS_EXPORT_PRIVATE void serviceOldGenerationLimitBeforeEntry();
+    JS_EXPORT_PRIVATE void serviceOldGenerationLimitIfPending();
 
     MutatorState mutatorState() const { return m_mutatorState; }
     std::optional<CollectionScope> collectionScope() const { return m_collectionScope; }
@@ -466,6 +476,19 @@ public:
     }
     JS_EXPORT_PRIVATE void reportExtraMemoryVisited(size_t);
 
+    // Parallel to extra-memory accounting: this drives a per-Heap old-generation
+    // limit without changing the global GC-pressure policy.
+    JS_EXPORT_PRIVATE void reportChargedOldMemoryAllocated(size_t);
+    JS_EXPORT_PRIVATE void noteChargedOldMemoryAllocated(size_t);
+    JS_EXPORT_PRIVATE bool noteChargedOldMemoryAllocatedOnce(uint32_t ownerID, size_t);
+    void rememberChargedOldSourceProvider(uint32_t ownerID);
+    JS_EXPORT_PRIVATE void reportChargedOldMemoryVisited(size_t);
+    void reportChargedOldMemoryVisited(const void*, size_t);
+    void reportChargedOldStringVisited(const StringImpl*);
+    bool addChargedOldMemoryOwner(const void*);
+    void addChargedOldMutableMemoryOwner(const JSCell*, void (*)(const JSCell*, Heap&));
+    bool hasOldGenerationLimit() const { return m_maxOldGenerationSize; }
+
 #if ENABLE(RESOURCE_USAGE)
     // Use this API to report the subset of extra memory that lives outside this process.
     JS_EXPORT_PRIVATE void reportExternalMemoryVisited(size_t);
@@ -519,6 +542,7 @@ public:
     void deleteAllUnlinkedCodeBlocks(DeleteAllCodeEffort);
 
     JS_EXPORT_PRIVATE void didAllocate(size_t);
+    JS_EXPORT_PRIVATE void didAllocateCharged(size_t);
 
     const JITStubRoutineSet& jitStubRoutines() { return *m_jitStubRoutines; }
     
@@ -714,6 +738,9 @@ private:
 
     Lock& lock() LIFETIME_BOUND { return m_lock; }
 
+    size_t chargedOldBytesEstimate() const;
+    void updateOldGenerationLimitAfterAllocation();
+
     void reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell*, size_t);
     JS_EXPORT_PRIVATE void reportExtraMemoryAllocatedSlowCase(GCDeferralContext*, const JSCell*, size_t);
     JS_EXPORT_PRIVATE void deprecatedReportExtraMemorySlowCase(size_t);
@@ -840,6 +867,7 @@ private:
 
     size_t visitCount();
     size_t bytesVisited();
+    size_t chargedOldBytesVisited();
     
     void forEachCodeBlockImpl(const ScopedLambda<void(CodeBlock*)>&);
     void forEachCodeBlockIgnoringJITPlansImpl(const AbstractLocker& codeBlockSetLocker, const ScopedLambda<void(CodeBlock*)>&);
@@ -877,6 +905,7 @@ private:
 
     Lock m_lock;
     const HeapType m_heapType;
+    const size_t m_maxOldGenerationSize;
     MutatorState m_mutatorState { MutatorState::Running };
     const size_t m_ramSize;
     const size_t m_minBytesPerCycle;
@@ -903,6 +932,11 @@ private:
     size_t m_totalBytesVisitedAfterLastFullCollect { 0 };
     size_t m_totalBytesVisited { 0 };
     size_t m_totalBytesVisitedThisCycle { 0 };
+    std::atomic<size_t> m_chargedOldAllocationDebt { 0 };
+    std::atomic<size_t> m_chargedOldBytesAfterLastFullCollect { 0 };
+    size_t m_chargedOldMarkedBytesThisFull { 0 };
+    std::atomic<size_t> m_chargedOldExtraMemorySize { 0 };
+    std::atomic<bool> m_oldGenerationLimitFullCollectionPending { false };
     double m_incrementBalance { 0 };
     
     bool m_shouldDoOpportunisticFullCollection { false };
@@ -1021,6 +1055,12 @@ private:
     unsigned m_numberOfWaitingParallelMarkers WTF_GUARDED_BY_LOCK(m_markingMutex) { 0 };
 
     ConcurrentPtrHashSet m_opaqueRoots;
+    std::unique_ptr<ConcurrentPtrHashSet> m_chargedOldMemoryOwners;
+    std::unique_ptr<ConcurrentPtrHashSet> m_chargedOldMutableMemoryOwners;
+    Lock m_chargedOldMutableMemoryOwnerLock;
+    Vector<std::pair<const JSCell*, void (*)(const JSCell*, Heap&)>> m_chargedOldMutableMemoryOwnerCallbacks WTF_GUARDED_BY_LOCK(m_chargedOldMutableMemoryOwnerLock);
+    Lock m_chargedOldSourceProviderLock;
+    std::unique_ptr<UncheckedKeyHashSet<uint32_t>> m_chargedOldSourceProvidersSinceLastFullCollect;
     static constexpr size_t s_blockFragmentLength = 32;
 
     ParallelHelperClient m_helperClient;

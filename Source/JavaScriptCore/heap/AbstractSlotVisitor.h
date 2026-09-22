@@ -190,8 +190,11 @@ public:
     virtual void addParallelConstraintTask(RefPtr<SharedTask<void(SlotVisitor&)>>) = 0;
 
     virtual void markAuxiliary(const void* base) = 0;
+    virtual void markAuxiliaryWithoutOldGenerationAccounting(const void* base) = 0;
 
     virtual void reportExtraMemoryVisited(size_t) = 0;
+    virtual void reportChargedOldMemoryVisited(const void* owner, size_t) = 0;
+    virtual void reportChargedOldMutableMemoryVisited(const JSCell* owner, void (*)(const JSCell*, Heap&)) = 0;
 #if ENABLE(RESOURCE_USAGE)
     virtual void reportExternalMemoryVisited(size_t) = 0;
 #endif

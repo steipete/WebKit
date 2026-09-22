@@ -52,6 +52,11 @@ void WeakMapImpl<WeakMapBucket>::visitChildrenImpl(JSCell* cell, Visitor& visito
     ASSERT_GC_OBJECT_INHERITS(thisObject, info());
     Base::visitChildren(thisObject, visitor);
     visitor.reportExtraMemoryVisited(thisObject->m_capacity * sizeof(WeakMapBucket));
+    if (visitor.heap()->hasOldGenerationLimit())
+        visitor.reportChargedOldMutableMemoryVisited(thisObject, [] (const JSCell* cell, Heap& heap) {
+            auto* map = static_cast<const WeakMapImpl*>(cell);
+            heap.reportChargedOldMemoryVisited(map->m_capacity * sizeof(WeakMapBucket));
+        });
 }
 
 DEFINE_VISIT_CHILDREN_WITH_MODIFIER(template<typename WeakMapBucket>, WeakMapImpl<WeakMapBucket>);

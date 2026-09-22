@@ -39,6 +39,7 @@
 #include "JSModuleNamespaceObject.h"
 #include "JSPromise.h"
 #include "ModuleProgramExecutable.h"
+#include "SourceProvider.h"
 #include "SourceProfiler.h"
 #include "UnlinkedModuleProgramCodeBlock.h"
 #include "WeakGCMapInlines.h"
@@ -74,6 +75,10 @@ JSModuleRecord::JSModuleRecord(VM& vm, Structure* structure, JSModuleLoader* mod
     , m_sourceCode(sourceCode)
     , m_features(features)
 {
+    if (vm.heap.hasOldGenerationLimit()) {
+        if (SourceProvider* provider = m_sourceCode.provider())
+            vm.heap.noteChargedOldMemoryAllocatedOnce(provider->asID(), provider->oldGenerationMemorySize());
+    }
 }
 
 void JSModuleRecord::destroy(JSCell* cell)
@@ -108,6 +113,10 @@ void JSModuleRecord::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     ASSERT_GC_OBJECT_INHERITS(thisObject, info());
     Base::visitChildren(thisObject, visitor);
     visitor.append(thisObject->m_moduleProgramExecutable);
+    if (visitor.heap()->hasOldGenerationLimit()) {
+        if (SourceProvider* provider = thisObject->sourceCode().provider())
+            provider->reportChargedOldMemory(visitor);
+    }
 
 #if USE(BUN_JSC_ADDITIONS)
     visitor.reportExtraMemoryVisited(thisObject->sourceCode().memoryCost());

@@ -2247,8 +2247,8 @@ std::unique_ptr<ParsedNode> Parser<LexerType>::parse(ParserError& error, const I
         result->setEndOffset(m_lexer->currentOffset());
 
         if (!isFunctionParseMode(parseMode)) {
-            m_source->provider()->setSourceURLDirective(m_lexer->sourceURLDirective());
-            m_source->provider()->setSourceMappingURLDirective(m_lexer->sourceMappingURLDirective());
+            m_source->provider()->setNewlyAllocatedSourceURLDirective(m_vm, m_lexer->sourceURLDirective());
+            m_source->provider()->setNewlyAllocatedSourceMappingURLDirective(m_vm, m_lexer->sourceMappingURLDirective());
         }
     } else {
         // We can never see a syntax error when reparsing a function, since we should have

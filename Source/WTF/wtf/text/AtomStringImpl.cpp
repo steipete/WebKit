@@ -90,10 +90,38 @@ static inline Ref<AtomStringImpl> addToStringTable(AtomStringTableLocker&, Strin
 }
 
 template<typename T, typename HashTranslator>
+static inline Ref<AtomStringImpl> addToStringTable(AtomStringTableLocker&, StringTableImpl& atomStringTable, const T& value, size_t* newlyAllocatedOwnedBackingCost)
+{
+    if (newlyAllocatedOwnedBackingCost)
+        *newlyAllocatedOwnedBackingCost = 0;
+    auto addResult = atomStringTable.add<HashTranslator>(value);
+
+    // If the string is newly-translated, then we need to adopt it.
+    // The boolean in the pair tells us if that is so.
+    if (addResult.isNewEntry) {
+        Ref atom = adoptRef(uncheckedDowncast<AtomStringImpl>(*addResult.iterator->get()));
+        if (newlyAllocatedOwnedBackingCost && atom->oldGenerationOwnerDuringGC() == atom.ptr()) {
+            size_t cost = atom->oldGenerationCostDuringGC();
+            if (cost)
+                *newlyAllocatedOwnedBackingCost = cost;
+        }
+        return atom;
+    }
+    return *uncheckedDowncast<AtomStringImpl>(addResult.iterator->get());
+}
+
+template<typename T, typename HashTranslator>
 static inline Ref<AtomStringImpl> addToStringTable(const T& value)
 {
     AtomStringTableLocker locker;
     return addToStringTable<T, HashTranslator>(locker, stringTable(), value);
+}
+
+template<typename T, typename HashTranslator>
+static inline Ref<AtomStringImpl> addToStringTable(const T& value, size_t* newlyAllocatedOwnedBackingCost)
+{
+    AtomStringTableLocker locker;
+    return addToStringTable<T, HashTranslator>(locker, stringTable(), value, newlyAllocatedOwnedBackingCost);
 }
 
 using UTF16Buffer = HashTranslatorCharBuffer<char16_t>;
@@ -129,6 +157,20 @@ RefPtr<AtomStringImpl> AtomStringImpl::add(std::span<const char16_t> characters)
     return addToStringTable<UTF16Buffer, UTF16BufferTranslator>(buffer);
 }
 
+RefPtr<AtomStringImpl> AtomStringImpl::add(std::span<const char16_t> characters, size_t* newlyAllocatedOwnedBackingCost)
+{
+    if (newlyAllocatedOwnedBackingCost)
+        *newlyAllocatedOwnedBackingCost = 0;
+    if (!characters.data())
+        return nullptr;
+
+    if (characters.empty())
+        return uncheckedDowncast<AtomStringImpl>(StringImpl::empty());
+
+    UTF16Buffer buffer { characters };
+    return addToStringTable<UTF16Buffer, UTF16BufferTranslator>(buffer, newlyAllocatedOwnedBackingCost);
+}
+
 RefPtr<AtomStringImpl> AtomStringImpl::add(HashTranslatorCharBuffer<char16_t>& buffer)
 {
     if (!buffer.characters.data())
@@ -138,6 +180,19 @@ RefPtr<AtomStringImpl> AtomStringImpl::add(HashTranslatorCharBuffer<char16_t>& b
         return uncheckedDowncast<AtomStringImpl>(StringImpl::empty());
 
     return addToStringTable<UTF16Buffer, UTF16BufferTranslator>(buffer);
+}
+
+RefPtr<AtomStringImpl> AtomStringImpl::add(HashTranslatorCharBuffer<char16_t>& buffer, size_t* newlyAllocatedOwnedBackingCost)
+{
+    if (newlyAllocatedOwnedBackingCost)
+        *newlyAllocatedOwnedBackingCost = 0;
+    if (!buffer.characters.data())
+        return nullptr;
+
+    if (buffer.characters.empty())
+        return uncheckedDowncast<AtomStringImpl>(StringImpl::empty());
+
+    return addToStringTable<UTF16Buffer, UTF16BufferTranslator>(buffer, newlyAllocatedOwnedBackingCost);
 }
 
 struct SubstringLocation {
@@ -286,6 +341,19 @@ RefPtr<AtomStringImpl> AtomStringImpl::add(HashTranslatorCharBuffer<Latin1Charac
     return addToStringTable<Latin1Buffer, Latin1BufferTranslator>(buffer);
 }
 
+RefPtr<AtomStringImpl> AtomStringImpl::add(HashTranslatorCharBuffer<Latin1Character>& buffer, size_t* newlyAllocatedOwnedBackingCost)
+{
+    if (newlyAllocatedOwnedBackingCost)
+        *newlyAllocatedOwnedBackingCost = 0;
+    if (!buffer.characters.data())
+        return nullptr;
+
+    if (buffer.characters.empty())
+        return uncheckedDowncast<AtomStringImpl>(StringImpl::empty());
+
+    return addToStringTable<Latin1Buffer, Latin1BufferTranslator>(buffer, newlyAllocatedOwnedBackingCost);
+}
+
 RefPtr<AtomStringImpl> AtomStringImpl::add(std::span<const Latin1Character> characters)
 {
     if (!characters.data())
@@ -296,6 +364,20 @@ RefPtr<AtomStringImpl> AtomStringImpl::add(std::span<const Latin1Character> char
 
     Latin1Buffer buffer { characters };
     return addToStringTable<Latin1Buffer, Latin1BufferTranslator>(buffer);
+}
+
+RefPtr<AtomStringImpl> AtomStringImpl::add(std::span<const Latin1Character> characters, size_t* newlyAllocatedOwnedBackingCost)
+{
+    if (newlyAllocatedOwnedBackingCost)
+        *newlyAllocatedOwnedBackingCost = 0;
+    if (!characters.data())
+        return nullptr;
+
+    if (characters.empty())
+        return uncheckedDowncast<AtomStringImpl>(StringImpl::empty());
+
+    Latin1Buffer buffer { characters };
+    return addToStringTable<Latin1Buffer, Latin1BufferTranslator>(buffer, newlyAllocatedOwnedBackingCost);
 }
 
 Ref<AtomStringImpl> AtomStringImpl::addLiteral(std::span<const Latin1Character> characters)
@@ -334,6 +416,17 @@ static Ref<AtomStringImpl> addSymbol(AtomStringTableLocker& locker, StringTableI
     if (base.is8Bit())
         return addToStringTable<SubstringLocation, SubstringTranslator8>(locker, atomStringTable, buffer);
     return addToStringTable<SubstringLocation, SubstringTranslator16>(locker, atomStringTable, buffer);
+}
+
+static Ref<AtomStringImpl> addSymbol(AtomStringTableLocker& locker, StringTableImpl& atomStringTable, StringImpl& base, size_t* newlyAllocatedOwnedBackingCost)
+{
+    ASSERT(base.length());
+    ASSERT(base.isSymbol());
+
+    SubstringLocation buffer = { &base, 0, base.length() };
+    if (base.is8Bit())
+        return addToStringTable<SubstringLocation, SubstringTranslator8>(locker, atomStringTable, buffer, newlyAllocatedOwnedBackingCost);
+    return addToStringTable<SubstringLocation, SubstringTranslator16>(locker, atomStringTable, buffer, newlyAllocatedOwnedBackingCost);
 }
 
 static inline Ref<AtomStringImpl> addSymbol(StringImpl& base)
@@ -449,6 +542,38 @@ Ref<AtomStringImpl> AtomStringImpl::addSlowCase(AtomStringTable& stringTable, St
     if (string.isSymbol()) {
         AtomStringTableLocker locker;
         return addSymbol(locker, stringTable.table(), string);
+    }
+
+    ASSERT_WITH_MESSAGE(!string.isAtom(), "AtomStringImpl should not hit the slow case if the string is already an atom.");
+
+    AtomStringTableLocker locker;
+    auto addResult = stringTable.table().add(&string);
+
+    if (addResult.isNewEntry) {
+        ASSERT(addResult.iterator->get() == &string);
+        string.setIsAtom(true);
+    }
+
+    return *uncheckedDowncast<AtomStringImpl>(addResult.iterator->get());
+}
+
+Ref<AtomStringImpl> AtomStringImpl::addSlowCase(AtomStringTable& stringTable, StringImpl& string, size_t* newlyAllocatedOwnedBackingCost)
+{
+    if (newlyAllocatedOwnedBackingCost)
+        *newlyAllocatedOwnedBackingCost = 0;
+    // This check is necessary for null symbols.
+    // Their length is zero, but they are not AtomStringImpl.
+    if (!string.length())
+        return *uncheckedDowncast<AtomStringImpl>(StringImpl::empty());
+
+    if (string.isStatic()) {
+        AtomStringTableLocker locker;
+        return addStatic(locker, stringTable.table(), string);
+    }
+
+    if (string.isSymbol()) {
+        AtomStringTableLocker locker;
+        return addSymbol(locker, stringTable.table(), string, newlyAllocatedOwnedBackingCost);
     }
 
     ASSERT_WITH_MESSAGE(!string.isAtom(), "AtomStringImpl should not hit the slow case if the string is already an atom.");

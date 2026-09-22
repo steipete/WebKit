@@ -135,6 +135,7 @@ public:
 
     unsigned size() const { return m_liveCount; }
     unsigned capacity() const { return m_entriesCapacity; }
+    size_t byteSize() const { return static_cast<size_t>(m_bucketCount) * sizeof(uint32_t) + static_cast<size_t>(m_entriesCapacity) * sizeof(ValueType); }
     bool isEmpty() const { return !m_liveCount; }
 
     iterator begin() LIFETIME_BOUND

@@ -30,7 +30,9 @@
 #include "ParseInt.h"
 #include "StackFrame.h"
 #include "VM.h"
+#include <wtf/CheckedArithmetic.h>
 #include <wtf/text/MakeString.h>
+#include <limits>
 
 namespace JSC {
 
@@ -117,8 +119,42 @@ void ErrorInstance::setStackFrames(VM& vm, WTF::Vector<StackFrame>&& stackFrames
 
     Locker locker { cellLock() };
     m_stackTrace = WTF::move(stackTrace);
+    updateChargedOldMemory(vm);
     vm.writeBarrier(this);
 }
+
+size_t ErrorInstance::chargedOldMemorySizeForAllocation() const
+{
+    CheckedSize result = m_stackTrace ? m_stackTrace->sizeInBytes() : 0;
+    const StringImpl* stackOwner = m_stackString.impl() ? m_stackString.impl()->oldGenerationOwnerDuringGC() : nullptr;
+    const StringImpl* sourceOwner = m_sourceURL.impl() ? m_sourceURL.impl()->oldGenerationOwnerDuringGC() : nullptr;
+    if (stackOwner)
+        result += stackOwner->oldGenerationCostDuringGC();
+    if (sourceOwner && sourceOwner != stackOwner)
+        result += sourceOwner->oldGenerationCostDuringGC();
+    return result.hasOverflowed() ? std::numeric_limits<size_t>::max() : result.value();
+}
+
+void ErrorInstance::updateChargedOldMemory(VM& vm)
+{
+    if (!vm.heap.hasOldGenerationLimit())
+        return;
+    size_t oldSize = m_reportedChargedOldMemorySize;
+    size_t newSize = chargedOldMemorySizeForAllocation();
+    m_reportedChargedOldMemorySize = newSize;
+    if (newSize > oldSize)
+        vm.heap.noteChargedOldMemoryAllocated(newSize - oldSize);
+}
+
+#if USE(BUN_JSC_ADDITIONS)
+void ErrorInstance::setSourceURL(String sourceURL)
+{
+    VM& vm = this->vm();
+    Locker locker { cellLock() };
+    m_sourceURL = WTF::move(sourceURL);
+    updateChargedOldMemory(vm);
+}
+#endif
 
 size_t ErrorInstance::estimatedSize(JSCell* cell, VM& vm)
 {
@@ -136,6 +172,33 @@ size_t ErrorInstance::estimatedSize(JSCell* cell, VM& vm)
     return Base::estimatedSize(cell, vm) + size;
 }
 
+template<typename Visitor>
+void ErrorInstance::visitChildrenImpl(JSCell* cell, Visitor& visitor)
+{
+    auto* thisObject = uncheckedDowncast<ErrorInstance>(cell);
+    ASSERT_GC_OBJECT_INHERITS(thisObject, info());
+    Base::visitChildren(thisObject, visitor);
+    if (!visitor.heap()->hasOldGenerationLimit())
+        return;
+
+    visitor.reportChargedOldMutableMemoryVisited(thisObject, [] (const JSCell* cell, Heap& heap) {
+        auto* error = static_cast<const ErrorInstance*>(cell);
+        Locker locker { error->cellLock() };
+        if (error->m_stackTrace)
+            heap.reportChargedOldMemoryVisited(error->m_stackTrace->sizeInBytes());
+        auto reportString = [&] (StringImpl* string) {
+            if (string) {
+                if (const StringImpl* owner = string->oldGenerationOwnerDuringGC())
+                    heap.reportChargedOldMemoryVisited(owner, owner->oldGenerationCostDuringGC());
+            }
+        };
+        reportString(error->m_stackString.impl());
+        reportString(error->m_sourceURL.impl());
+    });
+}
+
+DEFINE_VISIT_CHILDREN(ErrorInstance);
+
 void ErrorInstance::captureStackTrace(VM& vm, JSGlobalObject* globalObject, size_t framesToSkip, bool append)
 {
     {
@@ -147,6 +210,7 @@ void ErrorInstance::captureStackTrace(VM& vm, JSGlobalObject* globalObject, size
 
         if (!m_stackTrace || !append) {
             m_stackTrace = WTF::move(stackTrace);
+            updateChargedOldMemory(vm);
             vm.writeBarrier(this);
             return;
         }
@@ -161,6 +225,7 @@ void ErrorInstance::captureStackTrace(VM& vm, JSGlobalObject* globalObject, size
         }
 
         m_stackTrace = WTF::move(stackTrace);
+        updateChargedOldMemory(vm);
     }
     vm.writeBarrier(this);
 }
@@ -177,6 +242,7 @@ void ErrorInstance::finishCreation(VM& vm, const String& message, JSValue cause,
     {
         Locker locker { cellLock() };
         m_stackTrace = WTF::move(stackTrace);
+        updateChargedOldMemory(vm);
     }
     vm.writeBarrier(this);
 
@@ -209,6 +275,7 @@ void ErrorInstance::finishCreation(VM& vm, const String& message, JSValue cause,
     {
         Locker locker { cellLock() };
         m_stackTrace = WTF::move(stackTrace);
+        updateChargedOldMemory(vm);
     }
     vm.writeBarrier(this);
     if (!message.isNull())
@@ -224,11 +291,11 @@ void ErrorInstance::finishCreation(VM& vm, String&& message, LineColumn lineColu
     ASSERT(inherits(info()));
 
     m_lineColumn = lineColumn;
-    m_sourceURL = WTF::move(sourceURL);
-
     {
         Locker locker { cellLock() };
+        m_sourceURL = WTF::move(sourceURL);
         m_stackString = WTF::move(stackString);
+        updateChargedOldMemory(vm);
     }
 
     if (!message.isNull())
@@ -246,6 +313,7 @@ void ErrorInstance::finishCreationForEmbedderError(VM& vm)
     {
         Locker locker { cellLock() };
         m_stackTrace = WTF::move(stackTrace);
+        updateChargedOldMemory(vm);
     }
     vm.writeBarrier(this);
 
@@ -256,13 +324,15 @@ void ErrorInstance::setErrorInfoForEmbedderError(LineColumn lineColumn, String&&
 {
     ASSERT(!m_errorInfoMaterialized);
 
+    VM& vm = this->vm();
+    m_lineColumn = lineColumn;
     {
         Locker locker { cellLock() };
         m_stackTrace = nullptr;
+        m_sourceURL = WTF::move(sourceURL);
+        m_stackString = WTF::move(stackString);
+        updateChargedOldMemory(vm);
     }
-    m_lineColumn = lineColumn;
-    m_sourceURL = WTF::move(sourceURL);
-    m_stackString = WTF::move(stackString);
 }
 
 // Based on ErrorPrototype's errorProtoFuncToString(), but is modified to
@@ -424,6 +494,7 @@ void ErrorInstance::computeErrorInfo(VM& vm, bool allocationAllowed)
             Locker locker { cellLock() };
             m_stackTrace = nullptr;
             m_stackString = WTF::move(stackString);
+            updateChargedOldMemory(vm);
         }
 
     }
@@ -450,14 +521,18 @@ bool ErrorInstance::materializeErrorInfoIfNeeded(VM& vm)
             m_stackTrace->clear();
             m_stackTrace = nullptr;
             m_stackString = String();
+            updateChargedOldMemory(vm);
         }
 
         auto attributes = static_cast<unsigned>(PropertyAttribute::DontEnum);
 
         putDirect(vm, vm.propertyNames->line, jsNumber(m_lineColumn.line), attributes);
         putDirect(vm, vm.propertyNames->column, jsNumber(m_lineColumn.column), attributes);
-        if (!m_sourceURL.isEmpty())
+        if (!m_sourceURL.isEmpty()) {
             putDirect(vm, vm.propertyNames->sourceURL, jsString(vm, WTF::move(m_sourceURL)), attributes);
+            Locker locker { cellLock() };
+            updateChargedOldMemory(vm);
+        }
 
         if (!m_stackPropertyAlreadyMaterialized)
             putDirect(vm, vm.propertyNames->stack, stack, attributes);
@@ -473,14 +548,18 @@ bool ErrorInstance::materializeErrorInfoIfNeeded(VM& vm)
 
         putDirect(vm, vm.propertyNames->line, jsNumber(m_lineColumn.line), attributes);
         putDirect(vm, vm.propertyNames->column, jsNumber(m_lineColumn.column), attributes);
-        if (!m_sourceURL.isEmpty())
+        if (!m_sourceURL.isEmpty()) {
             putDirect(vm, vm.propertyNames->sourceURL, jsString(vm, WTF::move(m_sourceURL)), attributes);
+            Locker locker { cellLock() };
+            updateChargedOldMemory(vm);
+        }
 
         if (!m_stackPropertyAlreadyMaterialized) {
             WTF::String stackString;
             {
                 Locker locker { cellLock() };
                 stackString = WTF::move(m_stackString);
+                updateChargedOldMemory(vm);
             }
             putDirect(vm, vm.propertyNames->stack, jsString(vm, WTF::move(stackString)), attributes);
         }

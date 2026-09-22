@@ -62,20 +62,26 @@ Structure* SparseArrayValueMap::createStructure(VM& vm, JSGlobalObject* globalOb
 SparseArrayValueMap::AddResult SparseArrayValueMap::add(JSObject* array, unsigned i)
 {
     AddResult addResult;
-    size_t increasedCapacity = 0;
+    size_t chargedCapacityGrowth = 0;
+    size_t reportedCapacityGrowth = 0;
     {
         Locker locker { cellLock() };
+        size_t oldCapacity = m_set.capacity();
         addResult = m_set.ensure<SparseArrayEntryTranslator>(i, [&] {
             return SparseArrayEntry(i);
         });
         size_t capacity = m_set.capacity();
+        if (capacity > oldCapacity)
+            chargedCapacityGrowth = capacity - oldCapacity;
         if (capacity > m_reportedCapacity) {
-            increasedCapacity = capacity - m_reportedCapacity;
+            reportedCapacityGrowth = capacity - m_reportedCapacity;
             m_reportedCapacity = capacity;
         }
     }
-    if (increasedCapacity)
-        Heap::heap(array)->reportExtraMemoryAllocated(array, increasedCapacity * sizeof(SparseArrayEntry));
+    if (chargedCapacityGrowth)
+        Heap::heap(array)->noteChargedOldMemoryAllocated(chargedCapacityGrowth * sizeof(SparseArrayEntry));
+    if (reportedCapacityGrowth)
+        Heap::heap(array)->reportExtraMemoryAllocated(array, reportedCapacityGrowth * sizeof(SparseArrayEntry));
     return addResult;
 }
 
@@ -239,15 +245,18 @@ void SparseArrayValueMap::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     SparseArrayValueMap* thisObject = uncheckedDowncast<SparseArrayValueMap>(cell);
     ASSERT_GC_OBJECT_INHERITS(thisObject, info());
     Base::visitChildren(cell, visitor);
-    {
-        Locker locker { thisObject->cellLock() };
-        for (auto& entry : thisObject->m_set)
-            visitor.append(entry.asValue());
-    }
+    Locker locker { thisObject->cellLock() };
+    for (auto& entry : thisObject->m_set)
+        visitor.append(entry.asValue());
     visitor.reportExtraMemoryVisited(thisObject->m_reportedCapacity * sizeof(SparseArrayEntry));
+    if (visitor.heap()->hasOldGenerationLimit())
+        visitor.reportChargedOldMutableMemoryVisited(thisObject, [] (const JSCell* cell, Heap& heap) {
+            auto* map = static_cast<const SparseArrayValueMap*>(cell);
+            Locker locker { map->cellLock() };
+            heap.reportChargedOldMemoryVisited(map->m_set.capacity() * sizeof(SparseArrayEntry));
+        });
 }
 
 DEFINE_VISIT_CHILDREN(SparseArrayValueMap);
 
 } // namespace JSC
-

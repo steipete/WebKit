@@ -1424,6 +1424,13 @@ void Structure::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     }
     visitor.append(thisObject->m_previousOrRareData);
 
+    if (visitor.heap()->hasOldGenerationLimit())
+        visitor.reportChargedOldMutableMemoryVisited(thisObject, [] (const JSCell* cell, Heap& heap) {
+            auto* structure = const_cast<Structure*>(static_cast<const Structure*>(cell));
+            ConcurrentJSLocker locker(structure->m_lock);
+            heap.reportChargedOldStringVisited(structure->m_transitionPropertyName.get());
+        });
+
     if (thisObject->isPinnedPropertyTable() || thisObject->protectPropertyTableWhileTransitioning()) {
         // NOTE: This can interleave in pin(), in which case it may see a null property table.
         // That's fine, because then the barrier will fire and we will scan this again.

@@ -6298,6 +6298,9 @@ JSC_DEFINE_JIT_OPERATION(operationWeakSetAdd, void, (JSGlobalObject* globalObjec
     }
 
     uncheckedDowncast<JSWeakSet>(set)->add(vm, key, JSValue(), hash);
+    EnsureStillAliveScope ensureSetIsAlive(set);
+    EnsureStillAliveScope ensureKeyIsAlive(key);
+    vm.heap.serviceOldGenerationLimitIfPending();
     OPERATION_RETURN(scope);
 }
 
@@ -6313,7 +6316,12 @@ JSC_DEFINE_JIT_OPERATION(operationWeakMapSet, void, (JSGlobalObject* globalObjec
         OPERATION_RETURN(scope);
     }
 
-    uncheckedDowncast<JSWeakMap>(map)->add(vm, key, JSValue::decode(value), hash);
+    JSValue decodedValue = JSValue::decode(value);
+    uncheckedDowncast<JSWeakMap>(map)->add(vm, key, decodedValue, hash);
+    EnsureStillAliveScope ensureMapIsAlive(map);
+    EnsureStillAliveScope ensureKeyIsAlive(key);
+    EnsureStillAliveScope ensureValueIsAlive(decodedValue);
+    vm.heap.serviceOldGenerationLimitIfPending();
     OPERATION_RETURN(scope);
 }
 

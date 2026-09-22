@@ -51,6 +51,7 @@ public:
     typedef String (*SourceAppender) (const String& originalMessage, StringView sourceText, RuntimeType, SourceTextWhereErrorOccurred);
 
     DECLARE_EXPORT_INFO;
+    DECLARE_VISIT_CHILDREN;
 
     static size_t estimatedSize(JSCell*, VM&);
 
@@ -106,7 +107,7 @@ public:
 
 #if USE(BUN_JSC_ADDITIONS)
     const String& sourceURL() const { return m_sourceURL; }
-    void setSourceURL(String sourceURL) { m_sourceURL = sourceURL; } 
+    void setSourceURL(String);
 
     unsigned line() const { return m_lineColumn.line; }
     void setLine(unsigned line) { m_lineColumn.line = line; }
@@ -162,6 +163,8 @@ protected:
     JS_EXPORT_PRIVATE static bool deleteProperty(JSCell*, JSGlobalObject*, PropertyName, DeletePropertySlot&);
 
     void computeErrorInfo(VM&, bool allocationAllowed);
+    size_t chargedOldMemorySizeForAllocation() const;
+    void updateChargedOldMemory(VM&);
 
 #if USE(BUN_JSC_ADDITIONS)
     void* m_bunErrorData { nullptr };
@@ -172,6 +175,7 @@ protected:
     LineColumn m_lineColumn;
     String m_sourceURL;
     String m_stackString;
+    size_t m_reportedChargedOldMemorySize { 0 };
     RuntimeType m_runtimeTypeForCause { TypeNothing };
     ErrorType m_errorType { ErrorType::Error };
     bool m_stackOverflowError : 1;

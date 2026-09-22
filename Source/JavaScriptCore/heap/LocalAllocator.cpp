@@ -131,7 +131,10 @@ void* LocalAllocator::allocateSlowCase(JSC::Heap& heap, size_t cellSize, GCDefer
     doTestCollectionsIfNeeded(heap, deferralContext);
 
     ASSERT(!m_directory->markedSpace().isIterating());
-    heap.didAllocate(m_freeList.originalSize());
+    if (m_directory->subspace() == &heap.primitiveGigacageAuxiliarySpace)
+        heap.didAllocate(m_freeList.originalSize());
+    else
+        heap.didAllocateCharged(m_freeList.originalSize());
     
     didConsumeFreeList();
     
@@ -285,4 +288,3 @@ void LocalAllocator::doTestCollectionsIfNeeded(JSC::Heap& heap, GCDeferralContex
 }
 
 } // namespace JSC
-

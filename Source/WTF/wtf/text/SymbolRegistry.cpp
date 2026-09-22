@@ -44,6 +44,13 @@ SymbolRegistry::~SymbolRegistry()
 
 Ref<RegisteredSymbolImpl> SymbolRegistry::symbolForKey(const String& rep)
 {
+    return symbolForKey(rep, nullptr);
+}
+
+Ref<RegisteredSymbolImpl> SymbolRegistry::symbolForKey(const String& rep, bool* isNewEntry)
+{
+    if (isNewEntry)
+        *isNewEntry = false;
     auto addResult = m_table.add(rep.impl());
     if (!addResult.isNewEntry)
         return *downcast<SymbolImpl>(addResult.iterator->get())->asRegisteredSymbolImpl();
@@ -55,6 +62,8 @@ Ref<RegisteredSymbolImpl> SymbolRegistry::symbolForKey(const String& rep)
         symbol = RegisteredSymbolImpl::create(*rep.impl(), *this);
 
     *addResult.iterator = symbol;
+    if (isNewEntry)
+        *isNewEntry = true;
     return symbol.releaseNonNull();
 }
 

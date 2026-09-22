@@ -30,6 +30,8 @@
 #include "DeferredWorkTimer.h"
 #include "GlobalObjectMethodTable.h"
 #include "JSCInlines.h"
+#include <wtf/CheckedArithmetic.h>
+#include <limits>
 #include "JSInternalFieldObjectImplInlines.h"
 
 namespace JSC {
@@ -88,6 +90,12 @@ void JSFinalizationRegistry::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     totalBufferSizesInBytes += thisObject->m_noUnregistrationLive.capacity() * sizeof(decltype(thisObject->m_noUnregistrationLive.takeLast()));
     totalBufferSizesInBytes += thisObject->m_noUnregistrationDead.capacity() * sizeof(decltype(thisObject->m_noUnregistrationLive.takeLast()));
     visitor.vm().heap.reportExtraMemoryVisited(totalBufferSizesInBytes);
+    if (visitor.heap()->hasOldGenerationLimit())
+        visitor.reportChargedOldMutableMemoryVisited(thisObject, [] (const JSCell* cell, Heap& heap) {
+            auto* registry = static_cast<const JSFinalizationRegistry*>(cell);
+            Locker locker { registry->cellLock() };
+            heap.reportChargedOldMemoryVisited(registry->chargedOldMemorySize());
+        });
 }
 
 DEFINE_VISIT_CHILDREN(JSFinalizationRegistry);
@@ -100,6 +108,8 @@ void JSFinalizationRegistry::destroy(JSCell* table)
 void JSFinalizationRegistry::reconcileWeakReferencesAtGCEnd(VM& vm, CollectionScope)
 {
     Locker locker { cellLock() };
+    bool trackChargedOldMemory = vm.heap.hasOldGenerationLimit();
+    size_t oldChargedMemorySize = trackChargedOldMemory ? chargedOldMemorySize() : 0;
 
 #if ASSERT_ENABLED
     for (const auto& iter : m_deadRegistrations)
@@ -164,6 +174,11 @@ void JSFinalizationRegistry::reconcileWeakReferencesAtGCEnd(VM& vm, CollectionSc
         #endif
         m_hasAlreadyScheduledWork = true;
     }
+    if (trackChargedOldMemory) {
+        size_t newChargedMemorySize = chargedOldMemorySize();
+        if (newChargedMemorySize > oldChargedMemorySize)
+            vm.heap.noteChargedOldMemoryAllocated(newChargedMemorySize - oldChargedMemorySize);
+    }
 }
 
 void JSFinalizationRegistry::runFinalizationCleanup(JSGlobalObject* globalObject)
@@ -206,18 +221,70 @@ JSValue JSFinalizationRegistry::takeDeadHoldingsValue()
 
 void JSFinalizationRegistry::registerTarget(VM& vm, JSCell* target, JSValue holdings, JSValue token)
 {
-    Locker locker { cellLock() };
-    Registration registration;
-    registration.target = target;
-    registration.holdings.setWithoutWriteBarrier(holdings);
-    if (token.isUndefined())
-        m_noUnregistrationLive.append(WTF::move(registration));
-    else {
-        RELEASE_ASSERT(token.isCell());
-        auto result = m_liveRegistrations.add(token.asCell(), LiveRegistrations());
-        result.iterator->value.append(WTF::move(registration));
+    bool trackChargedOldMemory = vm.heap.hasOldGenerationLimit();
+    CheckedSize chargedMemoryGrowth = 0;
+    {
+        Locker locker { cellLock() };
+        size_t oldLiveMapCapacity = m_liveRegistrations.capacity();
+        size_t oldNoUnregistrationCapacity = m_noUnregistrationLive.capacity();
+        size_t oldTokenRegistrationsCapacity = 0;
+        if (trackChargedOldMemory && token.isCell()) {
+            auto iterator = m_liveRegistrations.find(token.asCell());
+            if (iterator != m_liveRegistrations.end())
+                oldTokenRegistrationsCapacity = iterator->value.capacity();
+        }
+        Registration registration;
+        registration.target = target;
+        registration.holdings.setWithoutWriteBarrier(holdings);
+        if (token.isUndefined())
+            m_noUnregistrationLive.append(WTF::move(registration));
+        else {
+            RELEASE_ASSERT(token.isCell());
+            auto result = m_liveRegistrations.add(token.asCell(), LiveRegistrations());
+            result.iterator->value.append(WTF::move(registration));
+        }
+        if (trackChargedOldMemory) {
+            auto addProduct = [&] (size_t count, size_t elementSize) {
+                CheckedSize bytes = count;
+                bytes *= elementSize;
+                chargedMemoryGrowth += bytes;
+            };
+            addProduct(m_liveRegistrations.capacity() - oldLiveMapCapacity, sizeof(typename decltype(m_liveRegistrations)::KeyValuePairType));
+            addProduct(m_noUnregistrationLive.capacity() - oldNoUnregistrationCapacity, sizeof(Registration));
+            if (token.isCell()) {
+                auto iterator = m_liveRegistrations.find(token.asCell());
+                ASSERT(iterator != m_liveRegistrations.end());
+                addProduct(iterator->value.capacity() - oldTokenRegistrationsCapacity, sizeof(Registration));
+            }
+        }
     }
     vm.writeBarrier(this);
+    if (chargedMemoryGrowth.hasOverflowed())
+        vm.heap.reportChargedOldMemoryAllocated(std::numeric_limits<size_t>::max());
+    else {
+        size_t chargedMemoryGrowthValue = chargedMemoryGrowth.value();
+        if (chargedMemoryGrowthValue)
+            vm.heap.reportChargedOldMemoryAllocated(chargedMemoryGrowthValue);
+    }
+}
+
+size_t JSFinalizationRegistry::chargedOldMemorySize() const
+{
+    CheckedSize result = 0;
+    auto addProduct = [&] (size_t count, size_t elementSize) {
+        CheckedSize bytes = count;
+        bytes *= elementSize;
+        result += bytes;
+    };
+    addProduct(m_deadRegistrations.capacity(), sizeof(typename decltype(m_deadRegistrations)::KeyValuePairType));
+    addProduct(m_liveRegistrations.capacity(), sizeof(typename decltype(m_liveRegistrations)::KeyValuePairType));
+    addProduct(m_noUnregistrationLive.capacity(), sizeof(Registration));
+    addProduct(m_noUnregistrationDead.capacity(), sizeof(WriteBarrier<Unknown>));
+    for (const auto& entry : m_liveRegistrations)
+        addProduct(entry.value.capacity(), sizeof(Registration));
+    for (const auto& entry : m_deadRegistrations)
+        addProduct(entry.value.capacity(), sizeof(WriteBarrier<Unknown>));
+    return result.hasOverflowed() ? std::numeric_limits<size_t>::max() : result.value();
 }
 
 bool JSFinalizationRegistry::unregister(VM&, JSCell* token)
@@ -279,5 +346,3 @@ Vector<JSFinalizationRegistry::DeadRegistration> JSFinalizationRegistry::deadReg
 }
 
 }
-
-

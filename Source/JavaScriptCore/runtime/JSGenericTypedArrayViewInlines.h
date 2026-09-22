@@ -773,7 +773,7 @@ void JSGenericTypedArrayView<Adaptor>::visitChildrenImpl(JSCell* cell, Visitor& 
     switch (mode) {
     case FastTypedArray: {
         if (vector)
-            visitor.markAuxiliary(vector);
+            visitor.markAuxiliaryWithoutOldGenerationAccounting(vector);
         break;
     }
 
