@@ -161,6 +161,7 @@ public:
 
     unsigned size() const { return keyCount(); }
     unsigned capacity() const { return tableSize(); }
+    size_t byteSize() const { return static_cast<size_t>(tableSize()) * sizeof(ValueType); }
     bool isEmpty() const { return !keyCount(); }
 
     void reserveInitialCapacity(unsigned keyCount)
