@@ -56,6 +56,7 @@ class InjectedScriptManager;
 class InspectorAgent;
 class InspectorConsoleAgent;
 class InspectorDebuggerAgent;
+class InspectorHeapAgent;
 class InspectorScriptProfilerAgent;
 class JSGlobalObjectConsoleClient;
 class JSGlobalObjectDebugger;
@@ -90,6 +91,7 @@ public:
     void disconnectFrontend(FrontendChannel&);
 
     void dispatchMessageFromFrontend(const String&);
+    JS_EXPORT_PRIVATE InspectorHeapAgent& ensureHeapAgent();
 
     void globalObjectDestroyed();
 
@@ -138,6 +140,7 @@ private:
     // Lazy, but also on-demand agents.
     CheckedPtr<InspectorAgent> m_inspectorAgent;
     InspectorDebuggerAgent* m_debuggerAgent { nullptr };
+    CheckedPtr<InspectorHeapAgent> m_heapAgent;
 
     const Ref<FrontendRouter> m_frontendRouter;
     const Ref<BackendDispatcher> m_backendDispatcher;

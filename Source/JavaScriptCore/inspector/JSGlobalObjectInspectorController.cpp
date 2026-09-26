@@ -104,6 +104,9 @@ JSGlobalObjectInspectorController::JSGlobalObjectInspectorController(JSGlobalObj
 
 JSGlobalObjectInspectorController::~JSGlobalObjectInspectorController()
 {
+    // Both non-owning heap-agent references must retire before the owning registry.
+    m_consoleClient->setPersistentHeapAgent(nullptr);
+    m_heapAgent = nullptr;
 #if ENABLE(INSPECTOR_ALTERNATE_DISPATCHERS)
     if (m_augmentingClient)
         m_augmentingClient->inspectorControllerDestroyed();
@@ -339,6 +342,18 @@ JSAgentContext JSGlobalObjectInspectorController::jsAgentContext()
     return context;
 }
 
+InspectorHeapAgent& JSGlobalObjectInspectorController::ensureHeapAgent()
+{
+    if (!m_heapAgent) {
+        auto context = jsAgentContext();
+        auto agent = makeUniqueRef<InspectorHeapAgent>(context);
+        m_heapAgent = agent.ptr();
+        m_consoleClient->setPersistentHeapAgent(agent.ptr());
+        m_agents.append(WTF::move(agent));
+    }
+    return *m_heapAgent;
+}
+
 void JSGlobalObjectInspectorController::createLazyAgents()
 {
     if (m_didCreateLazyAgents)
@@ -360,9 +375,7 @@ void JSGlobalObjectInspectorController::createLazyAgents()
     m_consoleClient->setPersistentScriptProfilerAgent(scriptProfilerAgent.ptr());
     m_agents.append(WTF::move(scriptProfilerAgent));
 
-    auto heapAgent = makeUniqueRef<InspectorHeapAgent>(context);
-    m_consoleClient->setPersistentHeapAgent(heapAgent.ptr());
-    m_agents.append(WTF::move(heapAgent));
+    ensureHeapAgent();
 
     m_agents.append(makeUniqueRef<JSGlobalObjectAuditAgent>(context));
 }
